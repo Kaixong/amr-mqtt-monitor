@@ -5,5 +5,7 @@ data/
 .env
 mosquitto/secrets/
 mosquitto/.auth-ready
+mosquitto/.tls-ready
+certs/
 mosquitto/data/
 dashboard/config.js

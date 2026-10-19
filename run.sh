@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: ./run.sh start | stop | restart | status | logs | test
+# Usage: ./run.sh start | stop | restart | status | logs | test | itest
 cd "$(dirname "$0")"
 PY="$PWD/.venv/bin/python"
 SERVICES=(simulator sysmon alarmd)
@@ -28,8 +28,9 @@ stop_one() {
 }
 
 start_all() {
-  # first run: create MQTT users/passwords and the broker's secrets
+  # first run: create MQTT users/passwords, TLS certificates and the broker's secrets
   [ -f .env ] && [ -f mosquitto/.auth-ready ] && [ -f dashboard/config.js ] || ./scripts/setup-auth.sh
+  [ -f certs/ca.crt ] && [ -f mosquitto/.tls-ready ] || ./scripts/setup-tls.sh
   set -a; . ./.env; set +a
   docker compose up -d
   start_one alarmd alarm alarmd.py
@@ -58,8 +59,11 @@ case "${1:-}" in
     for n in "${SERVICES[@]}"; do is_running "$n" && echo "$n: running" || echo "$n: stopped"; done ;;
   logs)
     tail -n 20 logs/*.log ;;
-  test)
-    "$PY" -m unittest discover -s tests -v ;;
+  test)       # unit tests, no services needed
+    "$PY" -m unittest discover -s tests -p 'test_*.py' -v ;;
+  itest)      # integration tests against the running broker and services
+    set -a; . ./.env; set +a
+    "$PY" -m unittest discover -s tests -p 'itest_*.py' -v ;;
   *)
-    echo "usage: $0 start|stop|restart|status|logs|test"; exit 1 ;;
+    echo "usage: $0 start|stop|restart|status|logs|test|itest"; exit 1 ;;
 esac

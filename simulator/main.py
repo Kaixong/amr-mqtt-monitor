@@ -8,8 +8,9 @@ Topics:
                        simulate_netloss: test hook, the AMR goes silent without a clean
                        DISCONNECT (like a dropped network); the broker then fires its Last Will
                        after 1.5 x keepalive. Restart the simulator to bring it back.
-  amr/<id>/cmd/result  {"req_id", "cmd", "ok", "state"} reply (QoS 1). Sent to the request's
-                       MQTT v5 Response Topic (with its Correlation Data) when one is given.
+  amr/<id>/cmd/result  {"req_id", "cmd", "ok", "state"} reply (QoS 1), echoing the request's
+                       MQTT v5 Correlation Data. This is the only Response Topic accepted.
+JSON messages carry Content Type + Payload Format Indicator; retained ones expire after 24 h.
 
 Each AMR keeps a persistent session (Session Expiry 60 s), so a command sent during a short
 network drop is delivered on reconnect - unless the sender's Message Expiry ran out first.
@@ -22,12 +23,16 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from common.mqttutil import add_args, connect, make_client, publish_props  # noqa: E402
+from common.mqttutil import (TELEMETRY_EXPIRY, add_args, connect, connected_ok,  # noqa: E402
+                             json_props, make_client, text_props)
+from paho.mqtt.packettypes import PacketTypes  # noqa: E402
 
 from amr import AMR, CHARGERS  # noqa: E402
 
 KEEPALIVE = 5          # broker declares us dead after 1.5 x keepalive
 SESSION_EXPIRY = 60
+STATUS_PROPS = json_props(expiry=TELEMETRY_EXPIRY)
+ONLINE_PROPS = text_props(expiry=TELEMETRY_EXPIRY)
 
 
 def parse_cmd(payload):
@@ -44,10 +49,13 @@ def parse_cmd(payload):
 def make_amr_client(amr, host, port):
     base = f"amr/{amr.id}"
     c = make_client(f"sim-{amr.id}", "simulator")
-    c.will_set(f"{base}/online", "offline", qos=1, retain=True)
+    c.will_set(f"{base}/online", "offline", qos=1, retain=True,
+               properties=text_props(TELEMETRY_EXPIRY, PacketTypes.WILLMESSAGE))
 
     def on_connect(client, userdata, flags, reason_code, properties):
-        client.publish(f"{base}/online", "online", qos=1, retain=True)
+        if not connected_ok(f"sim-{amr.id}", reason_code):
+            return
+        client.publish(f"{base}/online", "online", qos=1, retain=True, properties=ONLINE_PROPS)
         client.subscribe(f"{base}/cmd", qos=1)
         print(f"[{amr.id}] connected ({reason_code}, session_present={flags.session_present})")
 
@@ -60,15 +68,18 @@ def make_amr_client(amr, host, port):
         ok = amr.command(cmd)
         print(f"[{amr.id}] cmd={cmd!r} -> {'ok' if ok else 'ignored'} (state={amr.state})")
 
+        # reply on the requested Response Topic, echoing its Correlation Data. Only our own
+        # result topic is accepted (the ACL would drop anything else anyway).
         req = msg.properties
-        reply_topic = getattr(req, "ResponseTopic", None) or f"{base}/cmd/result"
-        props = {}
+        reply_topic = f"{base}/cmd/result"
+        if getattr(req, "ResponseTopic", None) not in (None, reply_topic):
+            print(f"[{amr.id}] ignoring response topic {req.ResponseTopic!r}")
+        props = json_props()
         if getattr(req, "CorrelationData", None):
-            props["CorrelationData"] = req.CorrelationData
+            props.CorrelationData = req.CorrelationData
         result = {"req_id": req_id, "cmd": cmd, "ok": ok, "state": amr.state,
                   "ts": round(time.time(), 3)}
-        client.publish(reply_topic, json.dumps(result), qos=1,
-                       properties=publish_props(**props) if props else None)
+        client.publish(reply_topic, json.dumps(result), qos=1, properties=props)
 
     c.on_connect = on_connect
     c.on_message = on_message
@@ -109,7 +120,8 @@ def main():
                     clients[a.id].loop_stop()
                     a.silenced = True
                 continue
-            clients[a.id].publish(f"amr/{a.id}/status", json.dumps(a.status()), retain=True)
+            clients[a.id].publish(f"amr/{a.id}/status", json.dumps(a.status()), retain=True,
+                                  properties=STATUS_PROPS)
         time.sleep(max(0.0, dt - (time.time() - t0)))
 
     for a in fleet:
@@ -117,7 +129,8 @@ def main():
             continue
         c = clients[a.id]
         try:
-            c.publish(f"amr/{a.id}/online", "offline", qos=1, retain=True).wait_for_publish(2)
+            c.publish(f"amr/{a.id}/online", "offline", qos=1, retain=True,
+                      properties=ONLINE_PROPS).wait_for_publish(2)
         except (RuntimeError, ValueError):
             pass  # not connected: the broker will publish the Last Will instead
         c.loop_stop()

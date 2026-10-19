@@ -27,7 +27,12 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from common.mqttutil import add_args, connect, make_client  # noqa: E402
+from common.mqttutil import (TELEMETRY_EXPIRY, add_args, connect, connected_ok,  # noqa: E402
+                             json_props, make_client, text_props)
+from paho.mqtt.packettypes import PacketTypes  # noqa: E402
+
+STATS_PROPS = json_props(expiry=TELEMETRY_EXPIRY)
+ONLINE_PROPS = text_props(expiry=TELEMETRY_EXPIRY)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "logs" / "sysmon"
 HEARTBEAT_TIMEOUT = 15  # s, sampler exits if heartbeat unchanged this long
@@ -159,12 +164,19 @@ def main():
             if topic_base is None:
                 # connect once we know the Windows host name (topic + Last Will depend on it)
                 topic_base = f"system/{data['host']}"
-                client.will_set(f"{topic_base}/online", "offline", qos=1, retain=True)
-                client.on_connect = lambda c, *_: c.publish(f"{topic_base}/online", "online",
-                                                            qos=1, retain=True)
+                client.will_set(f"{topic_base}/online", "offline", qos=1, retain=True,
+                                properties=text_props(TELEMETRY_EXPIRY, PacketTypes.WILLMESSAGE))
+
+                def on_connect(c, userdata, flags, reason_code, properties):
+                    if connected_ok("sysmon", reason_code):
+                        c.publish(f"{topic_base}/online", "online", qos=1, retain=True,
+                                  properties=ONLINE_PROPS)
+
+                client.on_connect = on_connect
                 connect(client, args.host, args.port, keepalive=10)
                 print(f"publishing to {topic_base}/stats every {args.interval}s")
-            client.publish(f"{topic_base}/stats", json.dumps(data), retain=True)
+            client.publish(f"{topic_base}/stats", json.dumps(data), retain=True,
+                           properties=STATS_PROPS)
         elif now - last_change > STALE_RELAUNCH:
             print("no fresh samples, launching sampler", flush=True)
             try:
@@ -179,8 +191,8 @@ def main():
     heartbeat.write_text("stop")
     if topic_base:
         try:
-            client.publish(f"{topic_base}/online", "offline", qos=1,
-                           retain=True).wait_for_publish(2)
+            client.publish(f"{topic_base}/online", "offline", qos=1, retain=True,
+                           properties=ONLINE_PROPS).wait_for_publish(2)
         except (RuntimeError, ValueError):
             pass  # not connected: the broker will publish the Last Will instead
         client.loop_stop()

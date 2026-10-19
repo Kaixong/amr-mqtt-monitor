@@ -20,7 +20,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from common.mqttutil import add_args, connect, make_client  # noqa: E402
+from common.mqttutil import (add_args, connect, connected_ok, json_props,  # noqa: E402
+                             make_client, text_props)
+from paho.mqtt.packettypes import PacketTypes  # noqa: E402
 
 from rules import AlarmEngine  # noqa: E402
 from store import AlarmStore  # noqa: E402
@@ -30,6 +32,7 @@ HISTORY_SIZE = 300
 # after a broker outage every device needs time to reconnect. Without this a broker restart
 # would raise an OFFLINE alarm for every AMR although the gap was the broker's, not theirs.
 GRACE = 10.0
+JSON = json_props()          # alarm state is retained without expiry: it must not vanish
 
 
 class AlarmService:
@@ -42,7 +45,8 @@ class AlarmService:
         self.connected_at = None   # None while disconnected from the broker
 
         self.client = make_client("alarmd", "alarmd")
-        self.client.will_set("alarms/service/online", "offline", qos=1, retain=True)
+        self.client.will_set("alarms/service/online", "offline", qos=1, retain=True,
+                             properties=text_props(packet=PacketTypes.WILLMESSAGE))
         self.client.on_connect = self.on_connect
         self.client.on_disconnect = self.on_disconnect
         self.client.on_message = self.on_message
@@ -50,8 +54,11 @@ class AlarmService:
 
     # ---------- MQTT ----------
     def on_connect(self, client, userdata, flags, reason_code, properties):
+        if not connected_ok("alarmd", reason_code):
+            return
         print(f"connected ({reason_code})", flush=True)
-        client.publish("alarms/service/online", "online", qos=1, retain=True)
+        client.publish("alarms/service/online", "online", qos=1, retain=True,
+                       properties=text_props())
         client.subscribe([("amr/+/status", 0), ("amr/+/online", 1),
                           ("system/+/stats", 0), ("system/+/online", 1), ("alarms/ack", 1)])
         with self.lock:
@@ -83,17 +90,18 @@ class AlarmService:
 
     def emit(self, action, alarm):
         self.client.publish("alarms/event", json.dumps({"action": action, "alarm": alarm},
-                                                       ensure_ascii=False), qos=1)
+                                                       ensure_ascii=False), qos=1, properties=JSON)
         print(f"{action:8} #{alarm['id']} [{alarm['severity']}] {alarm['message']}", flush=True)
 
     def publish_state(self):
         now = round(time.time(), 3)
         active = sorted(self.open.values(), key=lambda a: a["raised_at"], reverse=True)
         self.client.publish("alarms/active", json.dumps({"ts": now, "alarms": active},
-                                                        ensure_ascii=False), qos=1, retain=True)
+                                                        ensure_ascii=False),
+                            qos=1, retain=True, properties=JSON)
         self.client.publish("alarms/history",
                             json.dumps({"ts": now, "alarms": self.store.recent(HISTORY_SIZE)},
-                                       ensure_ascii=False), qos=1, retain=True)
+                                       ensure_ascii=False), qos=1, retain=True, properties=JSON)
 
     # ---------- logic ----------
     def handle_ack(self, req, now):
@@ -149,8 +157,8 @@ def main():
         time.sleep(0.5)
 
     try:
-        svc.client.publish("alarms/service/online", "offline", qos=1,
-                           retain=True).wait_for_publish(2)
+        svc.client.publish("alarms/service/online", "offline", qos=1, retain=True,
+                           properties=text_props()).wait_for_publish(2)
     except (RuntimeError, ValueError):
         pass
     svc.client.loop_stop()

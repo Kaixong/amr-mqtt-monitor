@@ -5,7 +5,7 @@
 - 模擬 5 台 AMR 在倉庫裡接任務、移動、充電、偶爾故障
 - 即時顯示**這台 Windows 電腦本身**的 CPU / 記憶體 / 磁碟 / 網路 / 電池
 - 自動**偵測異常**（斷線、故障、低電量、卡住、資源過高…），寫入資料庫並在網頁上警報
-- 所有資料都透過 **MQTT 5** 傳遞，網頁直接以 WebSocket 訂閱，沒有額外的後端 API
+- 所有資料都透過 **MQTT 5** 傳遞（後端走 TLS 加密），網頁直接以 WebSocket 訂閱，沒有額外的後端 API
 
 | 頁面 | 網址 |
 |---|---|
@@ -22,13 +22,14 @@
 4. [MQTT 設計](#4-mqtt-設計)
 5. [異常偵測](#5-異常偵測)
 6. [安全性](#6-安全性)
-7. [第一次安裝](#7-第一次安裝)
-8. [開啟](#8-開啟)
-9. [測試](#9-測試)
-10. [關閉](#10-關閉)
-11. [日常維運](#11-日常維運)
-12. [疑難排解](#12-疑難排解)
-13. [已知限制](#13-已知限制)
+7. [MQTT 最佳實務對照表](#7-mqtt-最佳實務對照表)
+8. [第一次安裝](#8-第一次安裝)
+9. [開啟](#9-開啟)
+10. [測試](#10-測試)
+11. [關閉](#11-關閉)
+12. [日常維運](#12-日常維運)
+13. [疑難排解](#13-疑難排解)
+14. [已知限制](#14-已知限制)
 
 ---
 
@@ -38,14 +39,15 @@
 |---|---|---|
 | 作業系統 | Windows 11 + **WSL2**（3.0.3）+ **Ubuntu 24.04** | Linux 環境跑在 Windows 上；專案放在 WSL 檔案系統（較快） |
 | 容器 | **Docker Engine** 29.9 + **Docker Compose** v5.6 | 執行 broker 與網頁伺服器，`restart: unless-stopped` 會隨 Docker 自動啟動 |
-| 訊息中介 | **Eclipse Mosquitto** 2.1.2（`eclipse-mosquitto:2`） | MQTT broker：TCP 1883、WebSocket 9001；帳密 + ACL、持久化、`$SYS` 統計 |
-| 通訊協定 | **MQTT 5.0** | Last Will、Retained、QoS 0/1、Session Expiry、Message Expiry、Response Topic、User Properties |
+| 訊息中介 | **Eclipse Mosquitto** 2.1.2（`eclipse-mosquitto:2`） | MQTT broker：TLS 8883、WebSocket 9001、Secure WebSocket 9443；帳密 + ACL、持久化、`$SYS` 統計 |
+| 通訊協定 | **MQTT 5.0** | Last Will、Retained、QoS 0/1、Session / Message Expiry、Response Topic + Correlation Data、Content Type、User Properties |
+| 加密 | **TLS 1.2+**，憑證由 **OpenSSL** 3.0 產生的私有 CA 簽發 | 後端連線加密並驗證 broker 身分 |
 | 網頁伺服器 | **nginx** 1.31（`nginx:alpine`） | 提供 `dashboard/` 靜態檔，port 8080 |
 | 後端程式 | **Python** 3.12 + **paho-mqtt** 2.1.0 | 模擬器、Windows 監控、異常偵測服務（各自一個 MQTT 用戶端） |
 | 資料庫 | **SQLite** 3.45（Python 內建） | 異常記錄 `data/alarms.db` |
 | Windows 資料來源 | **Windows PowerShell** 5.1 + **CIM/WMI** 效能計數器 | 讀取 Windows 本機 CPU（含每個執行緒）、記憶體、磁碟、網路、電池 |
 | 前端 | 原生 **HTML / CSS / JavaScript** + **MQTT.js** 5.10.1（CDN） + inline **SVG** | 不需要建置工具；地圖、圖表都是 SVG |
-| 測試 | Python **unittest** | 異常規則與資料庫的單元測試 |
+| 測試 | Python **unittest** | 單元測試（規則）＋整合測試（實際連 broker） |
 | 工具 | mosquitto-clients 2.0.18、git 2.43、bash | 手動測試、版本控制、啟動腳本 |
 
 ---
@@ -59,9 +61,9 @@ flowchart LR
     PS["PowerShell 取樣程式<br/>(隱藏視窗，CIM 查詢)"]
   end
   subgraph WSL["WSL2 · Ubuntu 24.04"]
-    subgraph DK["Docker"]
+    subgraph DK["Docker（只開放 127.0.0.1）"]
       NG["nginx :8080<br/>dashboard/ 靜態檔"]
-      MQ[("Mosquitto<br/>:1883 MQTT/TCP<br/>:9001 MQTT/WebSocket")]
+      MQ[("Mosquitto<br/>:8883 MQTT/TLS<br/>:9001 MQTT/WebSocket<br/>:9443 MQTT/WSS")]
     end
     SIM["simulator/main.py<br/>5 台 AMR"]
     SYS["monitor/sysmon.py"]
@@ -69,10 +71,10 @@ flowchart LR
     DB[("data/alarms.db<br/>SQLite")]
   end
   BR -- "HTTP 取得網頁" --> NG
-  BR <-- "MQTT 5 over WebSocket<br/>(帳號 dashboard)" --> MQ
-  SIM <-- "狀態 / 指令 / 回覆" --> MQ
-  SYS -- "電腦使用狀況" --> MQ
-  ALM <-- "訂閱全部遙測<br/>發布異常" --> MQ
+  BR <-- "MQTT 5 over WebSocket :9001<br/>(帳號 dashboard)" --> MQ
+  SIM <-- "MQTT 5 / TLS :8883<br/>狀態 / 指令 / 回覆" --> MQ
+  SYS -- "MQTT 5 / TLS :8883<br/>電腦使用狀況" --> MQ
+  ALM <-- "MQTT 5 / TLS :8883<br/>訂閱遙測、發布異常" --> MQ
   ALM --- DB
   PS -- "stats.json（每 2 秒）" --> SYS
   SYS -- "heartbeat" --> PS
@@ -82,8 +84,8 @@ flowchart LR
 
 | 元件 | 做什麼 | 重點設計 |
 |---|---|---|
-| **Mosquitto** | 所有資料的集散中心 | 關閉匿名、每個程式獨立帳號與最小權限 ACL；持久化讓保留訊息與 session 在重啟後還在 |
-| **simulator** | 5 台 AMR，每台一個 MQTT 連線，每 0.5 秒發布狀態 | 每台有自己的 Last Will（斷線時 broker 代發 `offline`）；持久 session；回覆指令結果 |
+| **Mosquitto** | 所有資料的集散中心 | 沒有明碼 TCP；關閉匿名；每個程式獨立帳號與最小權限 ACL；持久化讓保留訊息與 session 在重啟後還在 |
+| **simulator** | 5 台 AMR，每台一個 MQTT 連線，每 0.5 秒發布狀態 | 每台有自己的 Last Will（斷線時 broker 代發 `offline`）；持久 session；以 Correlation Data 回覆指令 |
 | **sysmon** | 把 Windows 使用狀況發布到 MQTT | 從 WSL 裡看到的是 WSL 虛擬機，不是 Windows；所以另外啟動一個**獨立、隱藏的 Windows PowerShell** 取樣，透過檔案交換資料（見下方） |
 | **alarmd** | 訂閱所有遙測，套用規則，產生 / 恢復 / 確認異常 | 規則（`rules.py`）是純邏輯、可單元測試；每筆異常寫入 SQLite；自己斷線時暫停判斷避免誤報 |
 | **nginx** | 只提供靜態檔 | 網頁自己用 MQTT.js 連 broker，nginx 不參與資料流 |
@@ -96,6 +98,13 @@ flowchart LR
 2. 儀表板收到後：紅色警報橫幅、選單徽章 +1、地圖紅圈、卡片顯示「最後回報 X 秒前」並停用按鈕、（可選）提示音
 3. 約 7.5 秒（keepalive 5 秒 × 1.5）後 broker 也確認斷線並代發 Last Will `amr/<id>/online = offline`
 4. 車輛重新連上 → alarmd 發布 `cleared`，記錄恢復時間；使用者可在異常記錄頁「確認」
+
+### 資料流：網頁按下「暫停」會發生什麼
+
+1. 網頁發布 `amr/AMR-01/cmd`：內容 `{"cmd":"pause","req_id":"…"}`，屬性 **Message Expiry 5 秒**、**Response Topic** `amr/AMR-01/cmd/result`、**Correlation Data**（隨機 ID）
+2. broker 依 ACL 確認 `dashboard` 可以寫這個主題，轉給 AMR-01（若 AMR-01 短暫斷線，持久 session 會先保留，超過 5 秒則丟棄）
+3. AMR-01 執行後回覆到 `amr/AMR-01/cmd/result`，**原樣帶回 Correlation Data**
+4. 網頁用 Correlation Data 找到對應的請求，顯示「✓ 已執行」；3 秒沒回覆則顯示「沒有回應」
 
 ### 為什麼 sysmon 要用「檔案 + 隱藏 PowerShell」
 
@@ -111,7 +120,7 @@ flowchart LR
 ```
 amr-mqtt-monitor/
 ├── run.sh                   # 啟動 / 停止 / 狀態 / 測試（在 Ubuntu 裡用）
-├── docker-compose.yml       # mosquitto + nginx
+├── docker-compose.yml       # mosquitto + nginx（只綁定 127.0.0.1）
 ├── requirements.txt         # Python 套件
 ├── simulator/
 │   ├── amr.py               # 單台 AMR 的模擬邏輯（狀態機、電量、移動）
@@ -123,25 +132,28 @@ amr-mqtt-monitor/
 │   ├── store.py             # SQLite 存取
 │   └── alarmd.py            # 異常偵測服務（MQTT 收發）
 ├── common/
-│   └── mqttutil.py          # 共用：MQTT 5 連線、帳密、重連退避
+│   └── mqttutil.py          # 共用：MQTT 5 + TLS 連線、帳密、重連退避、CONNACK 錯誤、PUBLISH 屬性
 ├── dashboard/
 │   ├── index.html           # 儀表板
 │   ├── alarms.html          # 異常記錄
 │   ├── common.js / .css     # 共用：連線、導覽列、警報橫幅、指令
-│   └── config.js            # （自動產生，不進 git）瀏覽器用的 MQTT 帳密
+│   └── config.js            # （自動產生，不進 git）瀏覽器用的 MQTT 帳密 / 網址
 ├── mosquitto/
 │   ├── mosquitto.conf       # broker 設定
 │   ├── acl                  # 各帳號的主題權限
-│   ├── secrets/             # （自動產生，不進 git）passwd + acl，僅 broker 可讀
+│   ├── secrets/             # （自動產生，不進 git）passwd、acl、憑證，僅 broker 可讀
 │   └── data/                # （不進 git）broker 持久化資料
 ├── scripts/
 │   ├── setup-auth.sh        # 建立 / 更換 MQTT 帳號密碼、套用 ACL
+│   ├── setup-tls.sh         # 建立私有 CA 與 broker 憑證
 │   └── windows/
 │       ├── start.ps1        # 從 Windows 一鍵啟動並開啟儀表板
 │       └── stop.ps1         # 從 Windows 一鍵關閉（含關閉 WSL）
 ├── tests/
-│   └── test_rules.py        # 單元測試
-├── .env                     # （自動產生，不進 git）MQTT 密碼
+│   ├── test_rules.py        # 單元測試（不需要啟動服務）
+│   └── itest_broker.py      # 整合測試（需要服務在執行）
+├── certs/                   # （自動產生，不進 git）ca.crt / ca.key / server.*
+├── .env                     # （自動產生，不進 git）MQTT 密碼與設定
 ├── data/alarms.db           # （不進 git）異常記錄
 └── logs/                    # （不進 git）各服務 log、PID、sysmon 交換檔
 ```
@@ -150,22 +162,34 @@ amr-mqtt-monitor/
 
 ## 4. MQTT 設計
 
+### 連接埠
+
+| Port | 協定 | 使用者 | 說明 |
+|---|---|---|---|
+| 8883 | MQTT over **TLS** | Python 服務、命令列工具 | 驗證 broker 憑證（`certs/ca.crt`）；**沒有**明碼的 1883 |
+| 9001 | MQTT over WebSocket | 瀏覽器（預設） | 只開放本機，見[已知限制](#14-已知限制) |
+| 9443 | MQTT over **Secure WebSocket** | 瀏覽器（選用） | 瀏覽器信任 `certs/ca.crt` 後可改用，見[日常維運](#12-日常維運) |
+
+所有 port 只綁定 `127.0.0.1`：這台電腦（含 Windows 端）可以連，網路上的其他裝置不行。
+
 ### 主題
 
 | 主題 | 發布者 | QoS / 保留 | 內容 |
 |---|---|---|---|
-| `amr/<id>/status` | simulator | 0 / retained | JSON：位置、方向、電量、狀態、任務、錯誤、里程…，每 0.5 秒 |
-| `amr/<id>/online` | simulator / broker | 1 / retained | `online`；斷線時 broker 代發 Last Will `offline` |
-| `amr/<id>/cmd` | 儀表板 | 1 | `pause` `resume` `charge` `clear` `go`；純文字或 JSON `{"cmd","req_id"}` |
-| `amr/<id>/cmd/result` | simulator | 1 | `{"req_id","cmd","ok","state","ts"}` |
-| `system/<host>/stats` | sysmon | 0 / retained | Windows 使用狀況 JSON，每 2 秒 |
-| `system/<host>/online` | sysmon / broker | 1 / retained | Last Will |
+| `amr/<id>/status` | simulator | 0 / retained（24 小時過期） | JSON：位置、方向、電量、狀態、任務、錯誤、里程…，每 0.5 秒 |
+| `amr/<id>/online` | simulator / broker | 1 / retained（24 小時過期） | `online`；斷線時 broker 代發 Last Will `offline` |
+| `amr/<id>/cmd` | 儀表板 | 1（5 秒過期） | `pause` `resume` `charge` `clear` `go`；純文字或 JSON `{"cmd","req_id"}` |
+| `amr/<id>/cmd/result` | simulator | 1 | `{"req_id","cmd","ok","state","ts"}`，並帶回請求的 Correlation Data |
+| `system/<host>/stats` | sysmon | 0 / retained（24 小時過期） | Windows 使用狀況 JSON，每 2 秒 |
+| `system/<host>/online` | sysmon / broker | 1 / retained（24 小時過期） | Last Will |
 | `alarms/active` | alarmd | 1 / retained | 進行中的異常 |
 | `alarms/history` | alarmd | 1 / retained | 最近 300 筆異常（新到舊） |
 | `alarms/event` | alarmd | 1 | `{"action": "raised"/"cleared"/"acked", "alarm": {...}}` |
 | `alarms/ack` | 儀表板 | 1 | `{"id": 12, "by": "..."}` 或 `{"all": true, "by": "..."}` |
 | `alarms/service/online` | alarmd / broker | 1 / retained | Last Will（儀表板據此顯示「異常偵測服務離線」） |
 | `$SYS/broker/...` | mosquitto | — | broker 統計（每 5 秒），顯示在儀表板 |
+
+所有 JSON 訊息都帶 **Content Type** `application/json` 與 **Payload Format Indicator**（UTF-8）；文字訊息帶 `text/plain`。
 
 ### 用到的 MQTT 機制與理由
 
@@ -174,12 +198,15 @@ amr-mqtt-monitor/
 | **QoS 0** | 高頻遙測（status、stats） | 下一筆很快就來，掉一筆無所謂，省開銷 |
 | **QoS 1** | 指令、回覆、上下線、異常 | 不能遺漏 |
 | **Retained** | 最新狀態、上下線、異常清單 | 新開網頁立刻有資料，不用等下一筆 |
+| **Message Expiry（保留訊息 24 小時）** | 遙測與上下線 | 下線很久的車輛 / 電腦會自動從 broker 消失，不會永遠殘留；異常清單**不**設過期 |
 | **Last Will** | 每台 AMR、sysmon、alarmd | 異常斷線時由 broker 代為通知 |
-| **Keepalive 5 秒** | AMR | broker 約 7.5 秒內判定斷線（原本 10 秒 → 15 秒） |
+| **Keepalive 5 秒** | AMR | broker 約 7.5 秒內判定斷線 |
 | **Session Expiry 60 秒** | AMR | 短暫斷線期間的指令在重連後仍會送達 |
-| **Message Expiry 5 秒** | 指令 | 超過 5 秒的舊指令由 broker 丟棄，不會在重連後被執行 |
-| **Response Topic** | 指令 | 標準的 request/response；按鈕能知道指令有沒有被執行 |
+| **Message Expiry（指令 5 秒）** | 指令 | 超過 5 秒的舊指令由 broker 丟棄，不會在重連後被執行 |
+| **Response Topic + Correlation Data** | 指令 | 標準的 request/response；回覆只送到自己的 `cmd/result`，網頁用 Correlation Data 對應請求 |
+| **Content Type / Payload Format Indicator** | 所有訊息 | 接收端不用猜格式 |
 | **User Properties** | 指令 | 標示送出者（`sender: dashboard`） |
+| **CONNACK 原因碼** | 所有 Python 服務 | 被拒絕時（例如密碼錯誤）在 log 寫出原因與處理建議，並以退避方式重試 |
 | **時間戳記判斷 retained 新舊** | 儀表板、alarmd | retained 可能是很久以前的資料，不能當成「剛收到」 |
 
 ---
@@ -201,7 +228,7 @@ amr-mqtt-monitor/
 - **遲滯（hysteresis）**：觸發與恢復門檻不同，數值在門檻附近時不會一直跳
 - **生命週期**：`raised`（發生）→ `cleared`（條件消失，自動）→ `acked`（人員確認，可在任何時候）
 - **離線時保留其他異常**：車輛離線時無法判斷它的故障有沒有恢復，所以維持原狀
-- **防誤報**：alarmd 與 broker 斷線期間、以及重新連上後 10 秒內暫停判斷（broker 重啟不會讓所有車同時誤報）
+- **防誤報**：alarmd 與 broker 斷線期間、以及重新連上後 10 秒內暫停判斷（broker 重啟不會讓所有車同時誤報）；`./run.sh stop` 會先停 alarmd
 - 門檻都在 [`alarm/rules.py`](alarm/rules.py) 的 `DEFAULTS`
 
 ---
@@ -210,16 +237,56 @@ amr-mqtt-monitor/
 
 | 項目 | 做法 |
 |---|---|
+| 傳輸加密 | Python 服務與命令列工具走 **TLS 1.2+**（port 8883），用 `certs/ca.crt` 驗證 broker 憑證（CN / SAN = localhost、127.0.0.1）；**沒有明碼 TCP port** |
+| 網路暴露 | Docker 只綁定 `127.0.0.1`，網路上的其他裝置連不到 |
 | 驗證 | `allow_anonymous false`，帳號：`simulator` `sysmon` `alarmd` `dashboard` |
-| 授權（ACL） | 最小權限，見 [`mosquitto/acl`](mosquitto/acl)。例如 `dashboard` 只能讀取、對 `amr/+/cmd` 下指令、對 `alarms/ack` 確認，**不能**假冒車輛狀態 |
+| 授權（ACL） | 最小權限，見 [`mosquitto/acl`](mosquitto/acl)。例如 `dashboard` 只能讀取、對 `amr/+/cmd` 下指令、對 `alarms/ack` 確認，**不能**假冒車輛狀態；`alarmd` 不能下指令 |
 | 密碼保存 | 隨機產生在 `.env`（權限 600、不進 git）；broker 端是雜湊後的 `mosquitto/secrets/passwd`，只有 broker 的使用者（uid 1883）可讀 |
+| 私鑰保存 | `certs/ca.key`、`certs/server.key` 權限 600、不進 git |
 | 瀏覽器帳密 | `dashboard/config.js` 會被網頁讀取，等同公開，所以 `dashboard` 帳號權限刻意最小 |
-| 封包限制 | `max_packet_size 256KB`、`max_queued_messages 1000`、`max_keepalive 60` |
-| 加密 | **尚未啟用 TLS**（只在本機使用，見[已知限制](#13-已知限制)） |
+| 資源限制 | 每個 listener `max_connections 50`；`max_packet_size 256KB`、`max_queued_messages 1000`、`max_keepalive 60` |
+| 回覆主題 | AMR 只會回覆到自己的 `cmd/result`，不接受請求指定其他主題 |
+
+以上每一項都有對應的整合測試（[10.2](#102-整合測試需要服務在執行)）。
 
 ---
 
-## 7. 第一次安裝
+## 7. MQTT 最佳實務對照表
+
+依 MQTT 5.0 規格、Mosquitto 官方文件與常見的 MQTT 實務指南逐項檢查：
+
+| 實務 | 狀態 | 在本專案 |
+|---|---|---|
+| 主題不以 `/` 開頭、不含空白、具體分層、包含裝置 ID | ✅ | `amr/<id>/status` 等 |
+| 不訂閱 `#`（只訂閱需要的） | ✅ | 每個程式只訂閱自己需要的主題 |
+| 依資料性質選 QoS | ✅ | 遙測 0、指令 / 事件 1 |
+| Retained 給「最新狀態」用 | ✅ | 狀態、上下線、異常清單 |
+| 保留訊息要能自動清除 | ✅ | 遙測設 24 小時 Message Expiry |
+| Last Will 偵測異常斷線 | ✅ | 每台 AMR、sysmon、alarmd |
+| 適當的 Keepalive | ✅ | AMR 5 秒、其他 10 秒 |
+| 持久 session 搭配 Session Expiry | ✅ | AMR 60 秒 |
+| 指令設 Message Expiry，避免執行過期指令 | ✅ | 5 秒（整合測試驗證） |
+| Request / Response 用 Response Topic + Correlation Data | ✅ | 指令與回覆 |
+| 標示酬載格式（Content Type、Payload Format Indicator） | ✅ | 所有訊息 |
+| 處理 CONNACK 原因碼 | ✅ | log 寫出原因與建議 |
+| 重連退避 | ✅ | 1 → 30 秒 |
+| 唯一的 Client ID | ✅ | `sim-AMR-01`、`sysmon`、`alarmd`、`dash-<隨機>` |
+| 關閉匿名、每個用戶端獨立帳號 | ✅ | 4 個帳號 |
+| 最小權限 ACL | ✅ | `mosquitto/acl` |
+| TLS 加密並驗證 broker 憑證 | ✅（後端）／⚠️（瀏覽器預設 ws，見限制） | 8883、9443 |
+| 不對外開放 port | ✅ | 只綁 127.0.0.1 |
+| 限制連線數與封包大小 | ✅ | `max_connections`、`max_packet_size` |
+| broker 持久化 | ✅ | `persistence true` |
+| 監控 broker（`$SYS`） | ✅ | 儀表板 Broker 面板 |
+| 自動化測試 | ✅ | 單元 14 項、整合 14 項 |
+| Topic Alias | ➖ 不採用 | 只在本機傳輸，主題很短，省下的流量可忽略，反而增加重連時的狀態管理 |
+| Shared Subscription（`$share/`） | ➖ 不採用 | alarmd 只有一個實例；需要水平擴充時再用 |
+| Will Delay Interval | ➖ 不採用 | 斷線要立刻通知；短暫斷線已由 alarmd 的判斷時間吸收 |
+| 用戶端憑證（mTLS） | ➖ 不採用 | 單機環境，帳密 + TLS 已足夠；多機部署時建議加上 |
+
+---
+
+## 8. 第一次安裝
 
 > 已經安裝好的電腦可以跳過這一節。
 
@@ -238,11 +305,11 @@ amr-mqtt-monitor/
    python3 -m venv .venv
    .venv/bin/pip install -r requirements.txt
    ```
-4. **MQTT 帳號密碼**：不用手動做，第一次 `./run.sh start` 會自動執行 `scripts/setup-auth.sh`。
+4. **MQTT 帳號密碼與 TLS 憑證**：不用手動做，第一次 `./run.sh start` 會自動執行 `scripts/setup-auth.sh` 與 `scripts/setup-tls.sh`。
 
 ---
 
-## 8. 開啟
+## 9. 開啟
 
 ### 方法 A：在 Ubuntu 終端機
 
@@ -271,61 +338,76 @@ powershell -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu-24.04\home\kuma\
 
 ---
 
-## 9. 測試
+## 10. 測試
 
 以下指令都在 Ubuntu 終端機、專案資料夾裡執行。
 
-### 9.1 單元測試（不需要啟動服務）
+### 10.1 單元測試（不需要啟動服務）
 
 ```bash
 ./run.sh test
 ```
 
-預期最後顯示 `Ran 14 tests ... OK`。
+預期最後顯示 `Ran 14 tests ... OK`（異常規則、遲滯、資料庫）。
 
-### 9.2 MQTT 連線與權限
+### 10.2 整合測試（需要服務在執行）
 
-先載入密碼（之後的指令都會用到）：
+```bash
+./run.sh itest
+```
+
+預期 `Ran 14 tests ... OK`，約 12 秒。會實際連到 broker 驗證：
+
+| 類別 | 驗證內容 |
+|---|---|
+| 傳輸 | 1883 明碼 port 不存在；不信任我們 CA 的用戶端連不上 8883；憑證是發給 localhost 的；9001 與 9443（WSS）可登入 |
+| 驗證 / 授權 | 匿名與錯誤密碼被拒；`dashboard` 不能假冒車輛狀態；`alarmd` 不能下指令 |
+| MQTT 5 | retained 狀態帶 Content Type / Payload Format / 24 小時過期；指令回覆帶回 Correlation Data；不接受其他 Response Topic；**持久 session 中過期的指令被 broker 丟棄、未過期的照常送達**；異常狀態為 retained JSON；`$SYS` 可讀 |
+
+### 10.3 用命令列手動操作 MQTT
+
+先載入密碼，並定義一個小函式 `mq`（自動帶上 TLS 與 dashboard 帳號），之後的指令都會用到：
 
 ```bash
 set -a; . ./.env; set +a
+mq() { local c=$1; shift; "mosquitto_$c" -h localhost -p 8883 --cafile certs/ca.crt -u dashboard -P "$MQTT_PASS_DASHBOARD" "$@"; }
 ```
 
 **匿名連線應被拒絕**（預期輸出 `Connection Refused: not authorised.`）：
 
 ```bash
-mosquitto_sub -t '#' -C 1 -W 3
+mosquitto_sub -h localhost -p 8883 --cafile certs/ca.crt -t '#' -C 1 -W 3
 ```
 
-**以 dashboard 帳號讀取車輛狀態**（預期印出 3 筆 JSON）：
+**讀取車輛狀態**（預期印出 3 筆 JSON）：
 
 ```bash
-mosquitto_sub -u dashboard -P "$MQTT_PASS_DASHBOARD" -t 'amr/+/status' -C 3 -v
+mq sub -t 'amr/+/status' -C 3 -v
 ```
 
 **ACL：dashboard 不能假冒車輛狀態**（預期輸出 `0`，代表假訊息被 broker 丟棄）：
 
 ```bash
-mosquitto_sub -u dashboard -P "$MQTT_PASS_DASHBOARD" -t amr/AMR-01/status -W 3 | grep -c FAKE &
-sleep 0.5; mosquitto_pub -u dashboard -P "$MQTT_PASS_DASHBOARD" -t amr/AMR-01/status -m '{"FAKE":1}'; wait
+mq sub -t amr/AMR-01/status -W 3 | grep -c FAKE &
+sleep 0.5; mq pub -t amr/AMR-01/status -m '{"FAKE":1}'; wait
 ```
 
-### 9.3 指令與回覆（request / response）
+### 10.4 指令與回覆（request / response）
 
 ```bash
-mosquitto_sub -u dashboard -P "$MQTT_PASS_DASHBOARD" -t amr/AMR-01/cmd/result -C 1 -W 5 &
-sleep 0.5; mosquitto_pub -u dashboard -P "$MQTT_PASS_DASHBOARD" -t amr/AMR-01/cmd -m '{"cmd":"pause","req_id":"test-1"}'; wait
-mosquitto_pub -u dashboard -P "$MQTT_PASS_DASHBOARD" -t amr/AMR-01/cmd -m resume
+mq sub -t amr/AMR-01/cmd/result -C 1 -W 5 &
+sleep 0.5; mq pub -t amr/AMR-01/cmd -m '{"cmd":"pause","req_id":"test-1"}'; wait
+mq pub -t amr/AMR-01/cmd -m resume
 ```
 
 預期回覆：`{"req_id": "test-1", "cmd": "pause", "ok": true, "state": "paused", ...}`。
 在網頁上則是按車輛卡片的按鈕，右下角會跳出「✓ 已執行」。
 
-### 9.4 異常警報（模擬車輛斷線）
+### 10.5 異常警報（模擬車輛斷線）
 
 ```bash
-mosquitto_sub -u dashboard -P "$MQTT_PASS_DASHBOARD" -t alarms/event -C 1 -W 10 &
-sleep 0.5; mosquitto_pub -u dashboard -P "$MQTT_PASS_DASHBOARD" -t amr/AMR-03/cmd -m simulate_netloss; wait
+mq sub -t alarms/event -C 1 -W 10 &
+sleep 0.5; mq pub -t amr/AMR-03/cmd -m simulate_netloss; wait
 ```
 
 預期約 3 秒內印出 `{"action": "raised", "alarm": {... "AMR-03 失去連線 ..."}}`。
@@ -338,7 +420,7 @@ sleep 0.5; mosquitto_pub -u dashboard -P "$MQTT_PASS_DASHBOARD" -t amr/AMR-03/cm
 
 約 10 秒後該筆異常會變成「已恢復」。
 
-### 9.5 查看資料庫裡的異常記錄
+### 10.6 查看資料庫裡的異常記錄
 
 ```bash
 .venv/bin/python -c "
@@ -350,7 +432,7 @@ for r in db.execute('SELECT id, datetime(raised_at, \"unixepoch\", \"localtime\"
 
 ---
 
-## 10. 關閉
+## 11. 關閉
 
 ### 方法 A：在 Ubuntu 終端機（只停 Python 服務）
 
@@ -370,7 +452,7 @@ powershell -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu-24.04\home\kuma\
 
 ---
 
-## 11. 日常維運
+## 12. 日常維運
 
 | 想做的事 | 指令（Ubuntu，專案資料夾） |
 |---|---|
@@ -380,30 +462,45 @@ powershell -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu-24.04\home\kuma\
 | 重新啟動服務 | `./run.sh restart` |
 | 更換全部 MQTT 密碼 | `./scripts/setup-auth.sh --rotate && ./run.sh restart`，之後重新整理網頁 |
 | 修改主題權限 | 編輯 `mosquitto/acl` 後 `./scripts/setup-auth.sh --acl-only`（不需重啟） |
+| 更新 broker 憑證（到期前） | `./scripts/setup-tls.sh --renew`（同一個 CA，用戶端不用改） |
+| 重建 CA | `./scripts/setup-tls.sh --new-ca && ./run.sh restart`（瀏覽器若信任過舊 CA 要重新匯入） |
+| 查看憑證到期日 | `openssl x509 -in certs/server.crt -noout -enddate` |
 | 調整異常門檻 | 編輯 `alarm/rules.py` 的 `DEFAULTS` 後 `./run.sh restart` |
 | 清空異常記錄 | `./run.sh stop && rm data/alarms.db && ./run.sh start` |
 | 改模擬車數 | 編輯 `run.sh` 裡 `start_one simulator simulator main.py` 加上 `-n 8` |
 
+### 讓瀏覽器也走加密（wss://，選用）
+
+瀏覽器預設用 `ws://localhost:9001`（只在本機、不出網路）。若要改用加密的 `wss://localhost:9443`：
+
+1. **由你自己**把 `certs/ca.crt` 匯入 Windows：在 Windows 檔案總管打開 `\\wsl.localhost\Ubuntu-24.04\home\kuma\amr-mqtt-monitor\certs\ca.crt` → 安裝憑證 → 目前使用者 → 「受信任的根憑證授權單位」。這會讓這台電腦信任此 CA 簽發的所有憑證，請確認 `certs/ca.key` 沒有外流。
+2. 在 `.env` 加一行 `DASHBOARD_WS_URL=wss://localhost:9443`，執行 `./scripts/setup-auth.sh`，重新整理網頁。
+3. 要改回來：刪掉 `.env` 那一行，再執行一次 `./scripts/setup-auth.sh`。
+
 ---
 
-## 12. 疑難排解
+## 13. 疑難排解
 
 | 症狀 | 原因 / 解法 |
 |---|---|
 | 網頁右上角「帳號驗證失敗（config.js）」 | 密碼換過但網頁是舊的 → 重新整理；或 `dashboard/config.js` 不存在 → `./scripts/setup-auth.sh` |
 | 網頁一直「重新連線中」 | broker 沒開 → `./run.sh status`、`docker compose up -d` |
+| log 出現 `broker refused connection: Not authorized` | 密碼換過但服務沒重啟 → `./run.sh restart` |
+| `certificate verify failed` | 用了錯的 CA 或憑證過期 → 確認用 `--cafile certs/ca.crt`；`./scripts/setup-tls.sh --renew` |
+| `mosquitto_sub` 連 1883 失敗 | 正常：已沒有明碼 port，請用 `-p 8883 --cafile certs/ca.crt`（或 10.3 的 `mq`） |
 | 電腦使用狀況顯示「沒有收到資料」 | `tail logs/sysmon.log`；sysmon 會在 10 秒沒有新資料時自動重啟取樣程式 |
-| 沒開終端機時 WSL 自己停掉 | 用[方法 B](#方法-bwindows-一鍵啟動會自動開啟瀏覽器)啟動（它會保持一個隱藏的 `wsl.exe`） |
+| 沒開終端機時 WSL 自己停掉 | 用[方法 B](#方法-b在-windows-一鍵啟動會自動開啟瀏覽器)啟動（它會保持一個隱藏的 `wsl.exe`） |
 | `./run.sh: Permission denied` | 從 Windows 編輯過檔案會遺失執行權限 → `chmod +x run.sh scripts/*.sh` |
 | `ls mosquitto/secrets` 權限不足 | 正常：該資料夾只給 broker（uid 1883）讀取 |
 | broker 重啟後一堆「失去連線」 | 已處理：alarmd 會暫停判斷 10 秒；若仍發生，代表車輛真的超過 10 秒沒連回來 |
 
 ---
 
-## 13. 已知限制
+## 14. 已知限制
 
-- **沒有 TLS**：連線只在本機（WSL 的 port 預設只轉發到 Windows 的 localhost）。若要讓其他電腦或手機連線，必須先加上 TLS（`listener 8883` + 憑證、WebSocket 改 `wss://`）並重新檢視帳號權限。
+- **瀏覽器預設走未加密的 `ws://`**：只綁在 127.0.0.1、不經過網路，所以風險低；要加密請照 [12](#讓瀏覽器也走加密wss選用) 讓瀏覽器信任 CA（需要你自己匯入憑證，這是 Windows 的安全性設定）。
 - **瀏覽器帳密是公開的**：任何能開網頁的人都看得到 `config.js`；`dashboard` 帳號只有最小權限。
+- **不能從其他電腦 / 手機連線**：port 只綁本機。若要開放，需改 `docker-compose.yml` 的綁定、憑證加上該主機名稱、瀏覽器改走 wss，並重新檢視帳號權限。
 - **模擬器沒有避碰**：車輛可能在地圖上重疊，包含開過離線車輛停住的位置。
 - **單獨關掉模擬器會記成「失去連線」**：`./run.sh stop` / `restart` 會先停 alarmd 所以不會；但若只停模擬器或它當掉，alarmd 無法分辨是計畫性停機。
 - **異常記錄頁只顯示最近 300 筆**：完整記錄在 `data/alarms.db`。

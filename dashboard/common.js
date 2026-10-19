@@ -1,8 +1,10 @@
 // Shared by every page: MQTT v5 connection, header/navigation, alarm banner + sound,
 // AMR commands with request/response, toasts and formatting helpers.
 const App = (() => {
-  const BROKER = `ws://${location.hostname || "localhost"}:9001`;
   const cfg = window.MQTT_CONFIG || {};
+  // plain ws:// on this machine by default; set url: "wss://localhost:9443" in config.js once
+  // the browser trusts certs/ca.crt (see README, TLS section)
+  const BROKER = cfg.url || `ws://${location.hostname || "localhost"}:9001`;
   const $ = id => document.getElementById(id);
 
   const SEVERITY = { critical: { label: "嚴重", c: "var(--bad)" }, warning: { label: "警告", c: "var(--warn)" } };
@@ -110,10 +112,16 @@ const App = (() => {
   }
 
   /* ---------- AMR commands: MQTT v5 request / response ---------- */
+  // the reply is matched by its MQTT v5 Correlation Data (req_id in the payload is only for
+  // command line users who can't set properties)
   const pending = {};
-  subscribe("amr/+/cmd/result", (topic, text) => {
-    const r = JSON.parse(text), p = pending[r.req_id];
-    if (p) { clearTimeout(p.timer); delete pending[r.req_id]; p.resolve(r); }
+  const enc = new TextEncoder(), dec = new TextDecoder();
+  subscribe("amr/+/cmd/result", (topic, text, packet) => {
+    const r = JSON.parse(text);
+    const corr = packet.properties?.correlationData;
+    const id = corr ? dec.decode(corr) : r.req_id;
+    const p = pending[id];
+    if (p) { clearTimeout(p.timer); delete pending[id]; p.resolve({ ...r, matchedBy: corr ? "correlationData" : "req_id" }); }
   }, 1);
 
   function sendCommand(amrId, cmd, timeoutMs = 3000) {
@@ -125,6 +133,9 @@ const App = (() => {
         properties: {
           messageExpiryInterval: 5,                    // don't execute stale commands later
           responseTopic: `amr/${amrId}/cmd/result`,
+          correlationData: enc.encode(req_id),
+          contentType: "application/json",
+          payloadFormatIndicator: true,
           userProperties: { sender: "dashboard" },
         },
       });
@@ -169,7 +180,8 @@ const App = (() => {
   }, 1);
 
   function ack(id) {
-    client.publish("alarms/ack", JSON.stringify(id === "all" ? { all: true, by: "dashboard" } : { id, by: "dashboard" }), { qos: 1 });
+    client.publish("alarms/ack", JSON.stringify(id === "all" ? { all: true, by: "dashboard" } : { id, by: "dashboard" }),
+                   { qos: 1, properties: { contentType: "application/json", payloadFormatIndicator: true } });
   }
 
   return { $, client, subscribe, sendCommand, ack, onAlarms, toast, esc,
