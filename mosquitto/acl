@@ -1,0 +1,34 @@
+# Topic permissions per user (least privilege). Applied by scripts/setup-auth.sh.
+# After editing, run: ./scripts/setup-auth.sh --acl-only
+
+# AMR simulator: owns amr/<id>/status|online|cmd/result, receives commands
+user simulator
+topic write amr/+/status
+topic write amr/+/online
+topic write amr/+/cmd/result
+topic read amr/+/cmd
+
+# Windows resource monitor
+user sysmon
+topic write system/+/stats
+topic write system/+/online
+
+# Alarm service: watches everything, owns alarms/*
+user alarmd
+topic read amr/#
+topic read system/#
+topic read alarms/ack
+topic write alarms/active
+topic write alarms/history
+topic write alarms/event
+topic write alarms/service/online
+
+# Browser dashboard (its password is visible to anyone who can open the page,
+# so it can only read, send AMR commands, and acknowledge alarms)
+user dashboard
+topic read amr/#
+topic read system/#
+topic read alarms/#
+topic read $SYS/#
+topic write amr/+/cmd
+topic write alarms/ack

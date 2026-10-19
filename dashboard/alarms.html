@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>異常記錄</title>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script src="config.js"></script>
+<link rel="stylesheet" href="common.css">
+<style>
+  main { padding: 16px 20px; display: flex; flex-direction: column; gap: 16px; max-width: 1400px; }
+  @media (max-width: 700px) { main { padding: 12px 16px; } }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; }
+  .tile .n { font-size: 28px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1.2; }
+  .tile .l { color: var(--muted); font-size: 12.5px; }
+  .tile.bad .n { color: var(--bad); }
+  .tile.warn .n { color: var(--warn); }
+
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+  .toolbar select, .toolbar input { font: inherit; font-size: 13px; padding: 5px 8px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+  .toolbar input { min-width: 180px; }
+  .toolbar .grow { flex: 1; }
+  .btn { font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 6px; cursor: pointer;
+         border: 1px solid var(--line); background: transparent; color: var(--text); white-space: nowrap; }
+  .btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.1); }
+  .btn:disabled { opacity: .4; cursor: default; }
+
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-weight: 600; color: var(--muted); font-size: 12px; padding: 8px 10px;
+       border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr.active td:first-child { box-shadow: inset 3px 0 0 var(--c); }
+  td.num, td.time { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.time small { display: block; color: var(--muted); }
+  td.msg { min-width: 260px; }
+  td.msg small { display: block; color: var(--muted); margin-top: 2px; }
+  .state { font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .state.on { color: var(--bad); }
+  .state.off { color: var(--ok); }
+  .acked { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .empty { text-align: center; color: var(--muted); padding: 40px 0; }
+  .foot { color: var(--muted); font-size: 12px; margin-top: 10px; }
+</style>
+</head>
+<body data-page="alarms">
+<main>
+  <div class="tiles">
+    <div class="tile bad"><div class="n" id="tCrit">–</div><div class="l">進行中・嚴重</div></div>
+    <div class="tile warn"><div class="n" id="tWarn">–</div><div class="l">進行中・警告</div></div>
+    <div class="tile"><div class="n" id="tUnack">–</div><div class="l">尚未確認</div></div>
+    <div class="tile"><div class="n" id="tToday">–</div><div class="l">今天發生</div></div>
+  </div>
+
+  <section class="panel">
+    <h2>異常記錄 <span id="updated"></span></h2>
+    <div class="toolbar">
+      <select id="fStatus">
+        <option value="all">全部狀態</option>
+        <option value="active">進行中</option>
+        <option value="cleared">已恢復</option>
+        <option value="unacked">尚未確認</option>
+      </select>
+      <select id="fSeverity">
+        <option value="all">全部等級</option>
+        <option value="critical">嚴重</option>
+        <option value="warning">警告</option>
+      </select>
+      <select id="fSource"><option value="all">全部來源</option></select>
+      <input id="fText" type="search" placeholder="搜尋內容…">
+      <span class="grow"></span>
+      <button class="btn" id="exportBtn">匯出 CSV</button>
+      <button class="btn primary" id="ackAllBtn">全部確認</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>#</th><th>發生時間</th><th>等級</th><th>來源</th><th>類型</th><th>內容</th>
+          <th>持續 / 恢復</th><th>狀態</th><th>確認</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div class="foot" id="foot"></div>
+  </section>
+</main>
+
+<script src="common.js"></script>
+<script>
+const { $, esc, fmtTime, fmtDateTime, fmtDuration, SEVERITY, typeLabel, subscribe, ack, toast } = App;
+let history = [];
+let historyTs = null;
+
+const filters = ["fStatus", "fSeverity", "fSource", "fText"];
+filters.forEach(id => $(id).addEventListener("input", render));
+
+function filtered() {
+  const st = $("fStatus").value, sev = $("fSeverity").value, src = $("fSource").value;
+  const text = $("fText").value.trim().toLowerCase();
+  return history.filter(a =>
+    (st === "all" || (st === "active" && !a.cleared_at) || (st === "cleared" && a.cleared_at)
+                  || (st === "unacked" && !a.acked_at)) &&
+    (sev === "all" || a.severity === sev) &&
+    (src === "all" || a.source === src) &&
+    (!text || `${a.message} ${a.source} ${typeLabel(a.type)}`.toLowerCase().includes(text)));
+}
+
+function detailText(d) {
+  const parts = [];
+  if (d.x != null) parts.push(`位置 (${(+d.x).toFixed(1)}, ${(+d.y).toFixed(1)})`);
+  if (d.task) parts.push(`任務 ${d.task}`);
+  if (d.battery != null) parts.push(`電量 ${(+d.battery).toFixed(0)}%`);
+  return parts.join(" · ");
+}
+
+function render() {
+  const now = Date.now() / 1000;
+  const active = history.filter(a => !a.cleared_at);
+  $("tCrit").textContent = active.filter(a => a.severity === "critical").length;
+  $("tWarn").textContent = active.filter(a => a.severity === "warning").length;
+  $("tUnack").textContent = history.filter(a => !a.acked_at).length;
+  const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
+  $("tToday").textContent = history.filter(a => a.raised_at * 1000 >= midnight).length;
+  $("ackAllBtn").disabled = !history.some(a => !a.acked_at);
+
+  // source filter options follow the data
+  const sources = [...new Set(history.map(a => a.source))].sort();
+  const sel = $("fSource"), cur = sel.value;
+  if (sel.options.length - 1 !== sources.length) {
+    sel.innerHTML = `<option value="all">全部來源</option>` +
+      sources.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join("");
+    sel.value = sources.includes(cur) ? cur : "all";
+  }
+
+  const rows = filtered();
+  $("rows").innerHTML = rows.length ? rows.map(a => {
+    const sev = SEVERITY[a.severity] || SEVERITY.warning;
+    const dur = (a.cleared_at || now) - a.raised_at;
+    const details = detailText(a.details || {});
+    return `<tr class="${a.cleared_at ? "" : "active"}" style="--c:${sev.c}">
+      <td class="num">${a.id}</td>
+      <td class="time">${fmtTime(a.raised_at)}<small>${fmtDateTime(a.raised_at).slice(0, 10)}</small></td>
+      <td><span class="badge" style="--c:${sev.c}">${sev.label}</span></td>
+      <td>${esc(a.source)}</td>
+      <td>${esc(typeLabel(a.type))}</td>
+      <td class="msg">${esc(a.message)}${details ? `<small>${esc(details)}</small>` : ""}</td>
+      <td class="time">${fmtDuration(dur)}${a.cleared_at ? `<small>${fmtTime(a.cleared_at)} 恢復</small>` : ""}</td>
+      <td>${a.cleared_at ? `<span class="state off">已恢復</span>` : `<span class="state on">● 進行中</span>`}</td>
+      <td>${a.acked_at
+        ? `<span class="acked">✓ ${fmtTime(a.acked_at)}<br>${esc(a.acked_by || "")}</span>`
+        : `<button class="btn" data-ack="${a.id}">確認</button>`}</td>
+    </tr>`;
+  }).join("") : `<tr><td colspan="9" class="empty">${history.length ? "沒有符合篩選條件的記錄" : "目前沒有異常記錄 🎉"}</td></tr>`;
+
+  $("foot").textContent = `顯示 ${rows.length} / ${history.length} 筆（最近 ${history.length} 筆，完整記錄存於 data/alarms.db）`;
+  $("updated").textContent = historyTs ? `更新於 ${fmtTime(historyTs)}` : "";
+}
+
+$("rows").addEventListener("click", e => {
+  const id = e.target.dataset.ack;
+  if (id) { e.target.disabled = true; ack(+id); }
+});
+$("ackAllBtn").onclick = () => { ack("all"); toast("已送出全部確認"); };
+
+$("exportBtn").onclick = () => {
+  const cols = ["id", "raised_at", "cleared_at", "severity", "source", "type", "message", "acked_at", "acked_by", "details"];
+  const cell = v => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const val = (a, c) => c.endsWith("_at") ? (a[c] ? fmtDateTime(a[c]) : "")
+                      : c === "details" ? JSON.stringify(a.details) : a[c];
+  const csv = "﻿" + [cols.join(","), ...filtered().map(a => cols.map(c => cell(val(a, c))).join(","))].join("\r\n");
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  link.download = `alarms-${fmtDateTime(Date.now() / 1000).replace(/[: ]/g, "-")}.csv`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+};
+
+subscribe("alarms/history", (t, text) => {
+  const data = JSON.parse(text);
+  history = data.alarms; historyTs = data.ts;
+  render();
+}, 1);
+setInterval(render, 1000);   // keep durations of active alarms ticking
+</script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/secrets:/mosquitto/secrets:ro
+      - ./mosquitto/data:/mosquitto/data
+    restart: unless-stopped
+  dashboard:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./dashboard:/usr/share/nginx/html:ro
+    restart: unless-stopped

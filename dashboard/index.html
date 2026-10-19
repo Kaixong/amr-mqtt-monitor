@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AMR 監控儀表板</title>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script src="config.js"></script>
+<link rel="stylesheet" href="common.css">
+<style>
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; padding: 16px 20px; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; padding: 12px 16px; } }
+  .col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+
+  /* map */
+  #map { width: 100%; height: auto; display: block; background: var(--floor); border-radius: 6px; }
+  #map .gridline { stroke: var(--grid); stroke-width: .05; }
+  #map .station rect { fill: var(--panel); stroke: var(--line); stroke-width: .08; }
+  #map .station text, #map .robot text { font-size: .8px; fill: var(--muted); text-anchor: middle; }
+  #map .charger rect { stroke: var(--charge); }
+  #map .drop rect { stroke: var(--accent); }
+  #map .robot { transition: transform .5s linear; }
+  #map .robot text { fill: var(--text); font-weight: 600; }
+  #map .ring { fill: none; stroke: var(--bad); stroke-width: .15; display: none; animation: pulse 1s infinite; }
+  #map .robot.alarm .ring { display: block; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; font-size: 12px; color: var(--muted); }
+  .legend span::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+                         margin-right: 5px; background: var(--c); vertical-align: -1px; }
+
+  /* fleet */
+  .fleet { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+  .amr { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .amr.alarm { border-color: var(--bad); box-shadow: 0 0 0 1px var(--bad); }
+  .amr.offline .kv, .amr.offline .bar { opacity: .5; }
+  .amr .top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .amr .name { font-weight: 600; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 12.5px; color: var(--muted); }
+  .kv b { color: var(--text); font-weight: 500; text-align: right; font-variant-numeric: tabular-nums;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .note { font-size: 12px; margin-top: 4px; min-height: 0; }
+  .note.bad { color: var(--bad); }
+  .note:empty { display: none; }
+  .btns { display: flex; gap: 6px; margin-top: 8px; }
+  .btns button { flex: 1; font: inherit; font-size: 12px; padding: 4px 0; border-radius: 6px; cursor: pointer;
+                 border: 1px solid var(--line); background: transparent; color: var(--text); }
+  .btns button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .btns button:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* bars */
+  .bar { height: 6px; background: var(--grid); border-radius: 99px; overflow: hidden; margin-top: 4px; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--c, var(--accent)); border-radius: 99px;
+             transition: width .4s; }
+
+  /* system + broker */
+  .big { display: flex; align-items: baseline; gap: 6px; }
+  .big .num { font-size: 30px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .big .unit { color: var(--muted); }
+  .sub { color: var(--muted); font-size: 12px; }
+  .spark { width: 100%; height: 46px; display: block; margin-top: 6px; }
+  .spark polyline { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+  .spark .area { stroke: none; opacity: .15; }
+  .cores { display: grid; grid-template-columns: repeat(auto-fill, minmax(20px, 1fr)); gap: 4px; margin-top: 10px; }
+  .core { height: 34px; background: var(--grid); border-radius: 3px; position: relative; overflow: hidden; }
+  .core > i { position: absolute; left: 0; right: 0; bottom: 0; background: var(--accent); transition: height .4s; }
+  .row { margin-top: 12px; }
+  .row .lbl { display: flex; justify-content: space-between; font-size: 12.5px; }
+  .row .lbl b { font-weight: 500; font-variant-numeric: tabular-nums; }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin-top: 12px; font-size: 12.5px; }
+  .stats div { color: var(--muted); }
+  .stats b { display: block; color: var(--text); font-weight: 500; font-size: 14px; font-variant-numeric: tabular-nums; }
+  .stale { color: var(--warn); font-size: 12px; }
+  .stale:empty { display: none; }
+</style>
+</head>
+<body data-page="dashboard">
+<main>
+  <div class="col">
+    <section class="panel">
+      <h2>倉庫地圖 <span id="fleetSummary"></span></h2>
+      <svg id="map" viewBox="0 0 40 25"></svg>
+      <div class="legend">
+        <span style="--c:var(--ok)">移動中</span><span style="--c:var(--idle)">閒置 / 離線</span>
+        <span style="--c:var(--charge)">充電中</span><span style="--c:var(--warn)">暫停</span>
+        <span style="--c:var(--bad)">錯誤</span>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>車隊狀態</h2>
+      <div class="fleet" id="fleet"></div>
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="panel">
+      <h2>電腦使用狀況 <span id="sysHost"></span></h2>
+      <div class="sub" id="sysCpuName">等待資料…</div>
+      <div class="row">
+        <div class="big"><span class="num" id="cpuNum">–</span><span class="unit">% CPU</span></div>
+        <svg class="spark" id="cpuSpark" viewBox="0 0 60 100" preserveAspectRatio="none"></svg>
+        <div class="cores" id="cores"></div>
+      </div>
+      <div class="row">
+        <div class="lbl"><span>記憶體</span><b id="memText">–</b></div>
+        <div class="bar"><i id="memBar"></i></div>
+        <svg class="spark" id="memSpark" viewBox="0 0 60 100" preserveAspectRatio="none"></svg>
+      </div>
+      <div id="disks"></div>
+      <div class="stats">
+        <div>網路下載<b id="netRx">–</b></div>
+        <div>網路上傳<b id="netTx">–</b></div>
+        <div>磁碟讀取<b id="dRead">–</b></div>
+        <div>磁碟寫入<b id="dWrite">–</b></div>
+        <div>電池<b id="bat">–</b></div>
+        <div>開機時間<b id="uptime">–</b></div>
+        <div>處理程序<b id="procs">–</b></div>
+        <div>磁碟忙碌<b id="dBusy">–</b></div>
+      </div>
+      <div class="stale" id="sysStale"></div>
+    </section>
+
+    <section class="panel">
+      <h2>MQTT Broker <span id="brokerVer"></span></h2>
+      <div class="stats" style="margin-top:0">
+        <div>連線中的用戶端<b id="bClients">–</b></div>
+        <div>訂閱數<b id="bSubs">–</b></div>
+        <div>收到訊息 / 分<b id="bRecv">–</b></div>
+        <div>送出訊息 / 分<b id="bSent">–</b></div>
+        <div>保留訊息<b id="bRetained">–</b></div>
+        <div>Broker 運行時間<b id="bUptime">–</b></div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script src="common.js"></script>
+<script>
+const { $, subscribe, sendCommand, onAlarms, toast } = App;
+const STALE_MS = 3000;   // a moving AMR reports twice a second
+const HIST = 60;
+
+const STATE = {
+  moving:   { label: "移動中", c: "var(--ok)" },
+  idle:     { label: "閒置",   c: "var(--idle)" },
+  charging: { label: "充電中", c: "var(--charge)" },
+  paused:   { label: "暫停",   c: "var(--warn)" },
+  error:    { label: "錯誤",   c: "var(--bad)" },
+};
+const CMD_LABEL = { pause: "暫停", resume: "繼續", charge: "去充電", clear: "清除錯誤" };
+const STATIONS = {
+  A1: [6, 5], A2: [14, 5], A3: [22, 5], A4: [30, 5],
+  B1: [6, 13], B2: [14, 13], B3: [22, 13], B4: [30, 13],
+  P1: [36, 20], P2: [36, 15], C1: [3, 21], C2: [7, 21], C3: [11, 21],
+};
+
+const SVG = "http://www.w3.org/2000/svg";
+const el = (tag, attrs = {}, parent) => {
+  const e = document.createElementNS(SVG, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+};
+// retained messages can be old: trust their timestamp; live ones arrive now
+// (avoids comparing the browser's clock with the publisher's)
+const seenAt = (data, packet) => packet.retain ? Math.min(Date.now(), data.ts * 1000) : Date.now();
+
+/* ---------- map ---------- */
+const map = $("map");
+for (let x = 0; x <= 40; x += 2) el("line", { x1: x, y1: 0, x2: x, y2: 25, class: "gridline" }, map);
+for (let y = 0; y <= 25; y += 2) el("line", { x1: 0, y1: y, x2: 40, y2: y, class: "gridline" }, map);
+for (const [name, [x, y]] of Object.entries(STATIONS)) {
+  const kind = name[0] === "C" ? "charger" : name[0] === "P" ? "drop" : "";
+  const g = el("g", { class: `station ${kind}` }, map);
+  el("rect", { x: x - 1.2, y: y - 0.8, width: 2.4, height: 1.6, rx: 0.2 }, g);
+  el("text", { x, y: y + 1.8 }, g).textContent = name;
+}
+const robotLayer = el("g", {}, map);
+
+/* ---------- fleet ---------- */
+const robots = {}; // id -> { status, online, lastSeen, g, body, card }
+let alarmsBySource = {};
+
+function ensureRobot(id) {
+  if (robots[id]) return robots[id];
+  const g = el("g", { class: "robot" }, robotLayer);
+  el("circle", { r: 1.25, class: "ring" }, g);
+  const body = el("g", {}, g);
+  el("circle", { r: 0.75 }, body);
+  el("path", { d: "M0.35,-0.45 L1.2,0 L0.35,0.45 Z", fill: "#fff", opacity: 0.9 }, body);
+  el("text", { y: -1.05 }, g).textContent = id.replace("AMR-", "");
+
+  const card = document.createElement("div");
+  card.className = "amr";
+  card.innerHTML = `
+    <div class="top"><span class="name">${id}</span><span class="badge">–</span></div>
+    <div class="kv">
+      <span>電量</span><b data-k="battery">–</b>
+      <span>任務</span><b data-k="task">–</b>
+      <span>位置</span><b data-k="pos">–</b>
+      <span>完成任務 / 里程</span><b data-k="done">–</b>
+    </div>
+    <div class="bar"><i data-k="batbar"></i></div>
+    <div class="note bad" data-k="note"></div>
+    <div class="btns">
+      <button data-cmd="pause">暫停</button><button data-cmd="resume">繼續</button>
+      <button data-cmd="charge">去充電</button><button data-cmd="clear">清除錯誤</button>
+    </div>`;
+  card.querySelectorAll("button").forEach(b => b.onclick = () => runCommand(id, b.dataset.cmd));
+  const list = $("fleet");
+  const after = [...list.children].find(c => c.dataset.id > id);
+  card.dataset.id = id;
+  list.insertBefore(card, after || null);
+
+  return robots[id] = { status: null, online: true, lastSeen: 0, g, body, card };
+}
+
+async function runCommand(id, cmd) {
+  const label = `${id}「${CMD_LABEL[cmd]}」`;
+  try {
+    const r = await sendCommand(id, cmd);
+    if (r.ok) toast(`✓ ${label} 已執行`, "var(--ok)");
+    else toast(`${label} 被忽略（目前狀態：${STATE[r.state]?.label || r.state}）`, "var(--warn)");
+  } catch {
+    toast(`✗ ${label} 沒有回應（3 秒逾時）`, "var(--bad)");
+  }
+}
+
+const isOffline = r => !r.online || Date.now() - r.lastSeen > STALE_MS;
+
+function renderRobot(r) {
+  const s = r.status; if (!s) return;
+  const st = STATE[s.state] || STATE.idle;
+  const offline = isOffline(r);
+  const alarms = alarmsBySource[s.id] || [];
+  r.g.setAttribute("transform", `translate(${s.x} ${s.y})`);
+  r.g.classList.toggle("alarm", alarms.length > 0);
+  r.body.setAttribute("transform", `rotate(${s.heading})`);
+  r.body.querySelector("circle").setAttribute("fill", offline ? "var(--idle)" : st.c);
+  r.body.style.opacity = offline ? 0.4 : 1;
+
+  const q = k => r.card.querySelector(`[data-k="${k}"]`);
+  r.card.classList.toggle("offline", offline);
+  r.card.classList.toggle("alarm", alarms.length > 0);
+  const badge = r.card.querySelector(".badge");
+  badge.textContent = offline ? "離線" : st.label;
+  badge.style.setProperty("--c", offline ? "var(--bad)" : st.c);
+  q("battery").textContent = `${s.battery.toFixed(0)}%`;
+  const bb = q("batbar");
+  bb.style.width = `${s.battery}%`;
+  bb.style.setProperty("--c", s.battery < 20 ? "var(--bad)" : s.battery < 40 ? "var(--warn)" : "var(--ok)");
+  q("task").textContent = s.task || "—";
+  q("pos").textContent = `(${s.x.toFixed(1)}, ${s.y.toFixed(1)}) ${Math.round(s.heading)}°`;
+  q("done").textContent = `${s.tasks_done} / ${s.odometer.toFixed(0)} m`;
+
+  const notes = [];
+  if (offline) notes.push(`⚠ 最後回報 ${App.fmtDuration((Date.now() - r.lastSeen) / 1000)}前，以上為最後已知資料`);
+  else if (s.error) notes.push(`⚠ ${s.error}`);
+  alarms.filter(a => a.type !== "OFFLINE" && a.type !== "ERROR")
+        .forEach(a => notes.push(`⚠ ${App.typeLabel(a.type)}`));
+  q("note").textContent = notes.join("　");
+  r.card.querySelectorAll("button").forEach(b => {
+    b.disabled = offline;
+    b.title = offline ? "車輛離線，無法下指令" : "";
+  });
+}
+
+function renderSummary() {
+  const list = Object.values(robots).filter(r => r.status);
+  const online = list.filter(r => !isOffline(r));
+  const counts = {};
+  online.forEach(r => counts[r.status.state] = (counts[r.status.state] || 0) + 1);
+  $("fleetSummary").textContent = `${online.length}/${list.length} 在線` +
+    Object.entries(counts).map(([k, n]) => ` · ${STATE[k]?.label || k} ${n}`).join("");
+}
+
+subscribe("amr/+/status", (topic, text, packet) => {
+  const r = ensureRobot(topic.split("/")[1]);
+  r.status = JSON.parse(text);
+  r.lastSeen = seenAt(r.status, packet);
+  renderRobot(r);
+});
+subscribe("amr/+/online", (topic, text) => {
+  const r = ensureRobot(topic.split("/")[1]);
+  r.online = text === "online";
+  renderRobot(r);
+}, 1);
+
+onAlarms(active => {
+  alarmsBySource = {};
+  active.forEach(a => (alarmsBySource[a.source] ||= []).push(a));
+  Object.values(robots).forEach(renderRobot);
+});
+
+/* ---------- PC resources ---------- */
+const hist = { cpu: [], mem: [] };
+let sysLast = 0;
+
+function spark(svg, values, color) {
+  const pts = values.map((v, i) => `${i + (HIST - values.length)},${100 - v}`).join(" ");
+  const first = HIST - values.length;
+  svg.innerHTML = values.length < 2 ? "" :
+    `<polygon class="area" fill="${color}" points="${first},100 ${pts} ${HIST - 1},100"/>` +
+    `<polyline stroke="${color}" points="${pts}"/>`;
+}
+const fmtBytes = b => {
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+  return `${b.toFixed(b >= 100 || i === 0 ? 0 : 1)} ${u[i]}`;
+};
+const fmtRate = b => `${fmtBytes(b)}/s`;
+const fmtUptime = s => {
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return d ? `${d} 天 ${h} 時` : `${h} 時 ${m} 分`;
+};
+const level = p => p >= 90 ? "var(--bad)" : p >= 70 ? "var(--warn)" : "var(--accent)";
+
+function renderSys(s) {
+  $("sysHost").textContent = s.host;
+  $("sysCpuName").textContent = `${s.cpu_name} · ${s.cores.length} 執行緒 · ${s.os}`;
+
+  $("cpuNum").textContent = s.cpu;
+  $("cpuNum").style.color = s.cpu >= 70 ? level(s.cpu) : "";
+  hist.cpu.push(s.cpu); if (hist.cpu.length > HIST) hist.cpu.shift();
+  spark($("cpuSpark"), hist.cpu, "var(--accent)");
+
+  const cores = $("cores");
+  if (cores.children.length !== s.cores.length)
+    cores.innerHTML = s.cores.map((_, i) => `<div class="core" title="核心 ${i}"><i></i></div>`).join("");
+  s.cores.forEach((v, i) => {
+    const bar = cores.children[i].firstChild;
+    bar.style.height = `${v}%`; bar.style.background = level(v);
+    cores.children[i].title = `執行緒 ${i}: ${v}%`;
+  });
+
+  const memPct = s.mem_used / s.mem_total * 100;
+  $("memText").textContent = `${fmtBytes(s.mem_used)} / ${fmtBytes(s.mem_total)} (${memPct.toFixed(0)}%)`;
+  $("memBar").style.width = `${memPct}%`;
+  $("memBar").style.setProperty("--c", level(memPct));
+  hist.mem.push(memPct); if (hist.mem.length > HIST) hist.mem.shift();
+  spark($("memSpark"), hist.mem, "var(--charge)");
+
+  $("disks").innerHTML = s.disks.map(d => {
+    const used = d.total - d.free, pct = used / d.total * 100;
+    return `<div class="row"><div class="lbl"><span>磁碟 ${d.name}</span>
+      <b>剩 ${fmtBytes(d.free)} / ${fmtBytes(d.total)}</b></div>
+      <div class="bar"><i style="width:${pct}%;--c:${level(pct)}"></i></div></div>`;
+  }).join("");
+
+  $("netRx").textContent = fmtRate(s.net_rx);
+  $("netTx").textContent = fmtRate(s.net_tx);
+  $("dRead").textContent = fmtRate(s.disk_read);
+  $("dWrite").textContent = fmtRate(s.disk_write);
+  $("dBusy").textContent = `${s.disk_busy}%`;
+  $("bat").textContent = s.battery == null ? "無" : `${s.battery}%${s.charging ? " ⚡充電中" : ""}`;
+  $("uptime").textContent = fmtUptime(s.uptime);
+  $("procs").textContent = s.procs;
+}
+
+subscribe("system/+/stats", (topic, text, packet) => {
+  const s = JSON.parse(text);
+  const at = seenAt(s, packet);
+  if (Date.now() - at < 10000) { sysLast = at; renderSys(s); }
+});
+subscribe("system/+/online", (topic, text) => { if (text === "offline") sysLast = 0; }, 1);
+
+/* ---------- broker ($SYS) ---------- */
+const SYS_FIELDS = {
+  "$SYS/broker/version": ["brokerVer", v => v.replace("mosquitto version ", "mosquitto ")],
+  "$SYS/broker/clients/connected": ["bClients"],
+  "$SYS/broker/subscriptions/count": ["bSubs"],
+  "$SYS/broker/load/messages/received/1min": ["bRecv", v => Math.round(+v)],
+  "$SYS/broker/load/messages/sent/1min": ["bSent", v => Math.round(+v)],
+  "$SYS/broker/retained messages/count": ["bRetained"],
+  "$SYS/broker/uptime": ["bUptime", v => fmtUptime(parseInt(v))],
+};
+for (const [topic, [id, fmt]] of Object.entries(SYS_FIELDS))
+  subscribe(topic, (t, v) => $(id).textContent = fmt ? fmt(v) : v);
+
+setInterval(() => {
+  Object.values(robots).forEach(renderRobot);
+  renderSummary();
+  $("sysStale").textContent = Date.now() - sysLast > 10000
+    ? "⚠ 沒有收到電腦狀態資料（sysmon 是否在執行？）" : "";
+}, 1000);
+</script>
+</body>
+</html>
