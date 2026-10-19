@@ -485,6 +485,7 @@ powershell -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu-24.04\home\kuma\
 |---|---|
 | 網頁右上角「帳號驗證失敗（config.js）」 | 密碼換過但網頁是舊的 → 重新整理；或 `dashboard/config.js` 不存在 → `./scripts/setup-auth.sh` |
 | 網頁一直「重新連線中」 | broker 沒開 → `./run.sh status`、`docker compose up -d` |
+| 從 Windows 的 PowerShell / 程式連 `localhost:8080` 或 `:9001` 逾時，但瀏覽器正常 | Windows 的 `localhost` 會先試 IPv6 `::1`，而 port 只綁 IPv4 `127.0.0.1`；瀏覽器會自動改用 IPv4，其他程式不一定 → 改連 `127.0.0.1` |
 | log 出現 `broker refused connection: Not authorized` | 密碼換過但服務沒重啟 → `./run.sh restart` |
 | `certificate verify failed` | 用了錯的 CA 或憑證過期 → 確認用 `--cafile certs/ca.crt`；`./scripts/setup-tls.sh --renew` |
 | `mosquitto_sub` 連 1883 失敗 | 正常：已沒有明碼 port，請用 `-p 8883 --cafile certs/ca.crt`（或 10.3 的 `mq`） |

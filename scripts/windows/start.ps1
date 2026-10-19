@@ -16,9 +16,11 @@ if (-not (Get-CimInstance Win32_Process -Filter "Name='wsl.exe'" |
 wsl -d $Distro --cd $Project -- ./run.sh start
 if ($LASTEXITCODE -ne 0) { Write-Warning "some services failed to start (see $Project/logs)" }
 
+# check 127.0.0.1, not "localhost": Windows tries ::1 first, and the ports are published on
+# IPv4 127.0.0.1 only, so ::1 hangs until the timeout (browsers fall back to IPv4 by themselves)
 $ready = $false
 for ($i = 0; $i -lt 30 -and -not $ready; $i++) {
-    try { Invoke-WebRequest http://localhost:8080 -UseBasicParsing -TimeoutSec 2 | Out-Null; $ready = $true }
+    try { Invoke-WebRequest http://127.0.0.1:8080 -UseBasicParsing -TimeoutSec 2 | Out-Null; $ready = $true }
     catch { Start-Sleep -Seconds 2 }
 }
 Write-Output "dashboard reachable: $ready"
