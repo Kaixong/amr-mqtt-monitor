@@ -17,7 +17,13 @@ start_one() { # name dir script args...
 }
 
 stop_one() {
-  if is_running "$1"; then kill "$(cat "logs/$1.pid")"; echo "$1 stopped"; else echo "$1 not running"; fi
+  if ! is_running "$1"; then echo "$1 not running"; rm -f "logs/$1.pid"; return; fi
+  local pid; pid=$(cat "logs/$1.pid")
+  kill "$pid"
+  # wait for a clean exit: otherwise a quick restart races the old process (e.g. its final
+  # retained "offline" could land after the new process's "online")
+  for _ in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+  kill -0 "$pid" 2>/dev/null && { kill -9 "$pid"; echo "$1 killed (did not exit in 10 s)"; } || echo "$1 stopped"
   rm -f "logs/$1.pid"
 }
 
@@ -29,10 +35,19 @@ start_all() {
   start_one alarmd alarm alarmd.py
   start_one simulator simulator main.py
   start_one sysmon monitor sysmon.py
+  # Don't return right away: when run as `wsl -- ./run.sh start`, wsl.exe exits with us and
+  # WSL tears the session down, killing a just-forked service before it has detached (setsid).
+  sleep 2
+  local failed=0
+  for n in "${SERVICES[@]}"; do
+    is_running "$n" || { echo "$n FAILED to start, see logs/$n.log"; failed=1; }
+  done
   echo "dashboard: http://localhost:8080   alarm log: http://localhost:8080/alarms.html"
+  return $failed
 }
 
-stop_all() { for n in "${SERVICES[@]}"; do stop_one "$n"; done; }
+# alarmd first, so a planned stop isn't recorded as every AMR going offline
+stop_all() { for n in alarmd simulator sysmon; do stop_one "$n"; done; }
 
 case "${1:-}" in
   start) start_all ;;

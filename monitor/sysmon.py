@@ -6,7 +6,8 @@ folder; this script publishes it. The sampler must be detached: a Windows proces
 directly through WSL interop is killed when the wsl.exe console that launched it closes.
 
 Lifecycle (no clocks compared across WSL/Windows, so clock drift doesn't matter):
-  - sysmon.py rewrites `heartbeat` every loop; the sampler exits if it stops changing
+  - sysmon.py rewrites `heartbeat` every loop; the sampler exits if it stops changing,
+    or right away when it reads "stop" (written by sysmon.py on a clean shutdown)
   - the sampler writes its PID to `sampler.pid` and exits if another sampler takes over
   - sysmon.py (re)launches a sampler whenever stats.json stops changing
 
@@ -53,6 +54,7 @@ while ($true) {
   # stop if superseded by a newer sampler, or if sysmon.py stopped beating
   if ((Get-Content $pidFile -Raw).Trim() -ne "$PID") { exit }
   $hb = Get-Content $hbFile -Raw
+  if ("$hb".Trim() -eq 'stop') { exit }   # sysmon.py shut down cleanly
   if ($hb -ne $lastHb) { $lastHb = $hb; $lastHbChange = $t0 }
   elseif (($t0 - $lastHbChange).TotalSeconds -gt __HB_TIMEOUT__) { exit }
 
@@ -173,7 +175,8 @@ def main():
 
         time.sleep(args.interval / 2)
 
-    # sampler notices the heartbeat stopped and exits by itself
+    # tell the sampler to exit now (if we die uncleanly it notices the stale heartbeat instead)
+    heartbeat.write_text("stop")
     if topic_base:
         try:
             client.publish(f"{topic_base}/online", "offline", qos=1,
