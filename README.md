@@ -48,7 +48,8 @@
 | 資料庫 | **SQLite** 3.45（Python 內建） | 異常記錄 `data/alarms.db`、車輛狀態區間 `data/telemetry.db` |
 | Windows 資料來源 | **Windows PowerShell** 5.1 + **CIM/WMI** 效能計數器 | 讀取 Windows 本機 CPU（含每個執行緒）、記憶體、磁碟、網路、電池 |
 | 前端 | 原生 **HTML / CSS / JavaScript** + **MQTT.js** 5.10.1（CDN） + inline **SVG** | 不需要建置工具；地圖、圖表都是 SVG |
-| 測試 | **pytest**（單元）、Python **unittest**（整合） | 單元測試（車輛狀態機、異常規則）＋整合測試（實際連 broker） |
+| 測試 | **pytest**（單元）、Python **unittest**（整合）、**flake8** | 單元測試（車輛狀態機、異常規則、稼動率）＋整合測試（實際連 broker） |
+| CI | **GitHub Actions**（`.github/workflows/ci.yml`） | 每次 push / PR：flake8 + 單元測試；再在 runner 上啟動整套服務跑整合測試 |
 | 工具 | mosquitto-clients 2.0.18、git 2.43、bash | 手動測試、版本控制、啟動腳本 |
 
 ---
@@ -128,7 +129,9 @@ amr-mqtt-monitor/
 ├── run.sh                   # 啟動 / 停止 / 狀態 / 測試（在 Ubuntu 裡用）
 ├── docker-compose.yml       # mosquitto + nginx（只綁定 127.0.0.1）
 ├── requirements.txt         # Python 套件
-├── requirements-dev.txt     # ＋ pytest（開發 / 測試用）
+├── requirements-dev.txt     # ＋ pytest、flake8（開發 / 測試用）
+├── .flake8                  # lint 設定
+├── .github/workflows/ci.yml # GitHub Actions：lint + 單元測試 + 整合測試
 ├── simulator/
 │   ├── amr.py               # 單台 AMR 的模擬邏輯（狀態機、電量、移動）
 │   └── main.py              # 車隊 + MQTT（狀態發布、指令、回覆、Last Will）
@@ -368,6 +371,12 @@ powershell -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu-24.04\home\kuma\
 ## 10. 測試
 
 以下指令都在 Ubuntu 終端機、專案資料夾裡執行。
+
+**CI（GitHub Actions）**：每次 push / PR 會自動跑兩個 job：
+1. `unit`：`flake8`（設定在 `.flake8`）＋ `./run.sh test`
+2. `integration`：在 GitHub 的 Ubuntu runner 上從零執行 `./run.sh start`（自動建立帳號、憑證，用 Docker 啟動 mosquitto + nginx 與所有 Python 服務），再跑 `./run.sh itest` 並確認儀表板有回應。runner 上沒有 Windows，所以 sysmon 只會記錄「無法取樣」，不影響其他測試
+
+本機要跑一樣的 lint：`.venv/bin/flake8`。
 
 ### 10.1 單元測試（不需要啟動服務）
 

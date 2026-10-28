@@ -13,7 +13,12 @@ The user writes in Traditional Chinese (zh-TW); reply in Traditional Chinese.
 ./run.sh start | stop | restart | status | logs
 ./run.sh test     # 58 unit tests (pytest, requirements-dev.txt), no services needed
 ./run.sh itest    # 16 integration tests against the running broker (start first)
+.venv/bin/flake8  # lint (max line 110, .flake8)
 ```
+
+CI: `.github/workflows/ci.yml` runs flake8 + `./run.sh test`, then `./run.sh start` + `itest` on a
+fresh Ubuntu runner (no Windows there: sysmon only logs that it can't sample). Keep `run.sh start`
+working from a fresh clone with no `.env` / certs.
 
 - Dashboard http://localhost:8080 , alarm log http://localhost:8080/alarms.html
 - After changing Python services: `./run.sh restart`. Dashboard files are served live by nginx.
