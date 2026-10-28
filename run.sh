@@ -59,8 +59,8 @@ case "${1:-}" in
     for n in "${SERVICES[@]}"; do is_running "$n" && echo "$n: running" || echo "$n: stopped"; done ;;
   logs)
     tail -n 20 logs/*.log ;;
-  test)       # unit tests, no services needed
-    "$PY" -m unittest discover -s tests -p 'test_*.py' -v ;;
+  test)       # unit tests, no services needed (pytest: pip install -r requirements-dev.txt)
+    "$PY" -m pytest tests -v ;;
   itest)      # integration tests against the running broker and services
     set -a; . ./.env; set +a
     "$PY" -m unittest discover -s tests -p 'itest_*.py' -v ;;

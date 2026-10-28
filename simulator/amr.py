@@ -44,17 +44,19 @@ class AMR:
         self.odometer = 0.0
 
     # ---------- commands ----------
+    # Commands that start new work (go, charge) are only accepted while idle: they never
+    # preempt a running task, a charge or a paused task. pause / resume / clear only change
+    # how the current work runs. Returns True if the command was accepted.
     def command(self, cmd):
-        if cmd == "pause" and self.state not in ("paused", "error"):
+        if cmd == "pause" and self.state in ("idle", "moving", "charging"):
             self.paused_from, self.state = self.state, "paused"
         elif cmd == "resume" and self.state == "paused":
             self.state, self.paused_from = self.paused_from or "idle", None
-        elif cmd == "charge" and self.state not in ("charging", "error"):
-            self._go_charge()
         elif cmd == "clear" and self.state == "error":
             self.state, self.error_msg = ("moving" if self.route else "idle"), None
-        elif cmd == "go" and self.state in ("idle", "charging", "paused"):
-            self.paused_from = self.charger = None
+        elif cmd == "charge" and self.state == "idle":
+            self._go_charge()
+        elif cmd == "go" and self.state == "idle":
             self._new_task()
         else:
             return False

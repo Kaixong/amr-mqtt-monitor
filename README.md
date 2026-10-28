@@ -47,7 +47,7 @@
 | 資料庫 | **SQLite** 3.45（Python 內建） | 異常記錄 `data/alarms.db` |
 | Windows 資料來源 | **Windows PowerShell** 5.1 + **CIM/WMI** 效能計數器 | 讀取 Windows 本機 CPU（含每個執行緒）、記憶體、磁碟、網路、電池 |
 | 前端 | 原生 **HTML / CSS / JavaScript** + **MQTT.js** 5.10.1（CDN） + inline **SVG** | 不需要建置工具；地圖、圖表都是 SVG |
-| 測試 | Python **unittest** | 單元測試（規則）＋整合測試（實際連 broker） |
+| 測試 | **pytest**（單元）、Python **unittest**（整合） | 單元測試（車輛狀態機、異常規則）＋整合測試（實際連 broker） |
 | 工具 | mosquitto-clients 2.0.18、git 2.43、bash | 手動測試、版本控制、啟動腳本 |
 
 ---
@@ -150,7 +150,8 @@ amr-mqtt-monitor/
 │       ├── start.ps1        # 從 Windows 一鍵啟動並開啟儀表板
 │       └── stop.ps1         # 從 Windows 一鍵關閉（含關閉 WSL）
 ├── tests/
-│   ├── test_rules.py        # 單元測試（不需要啟動服務）
+│   ├── test_amr.py          # 單元測試：車輛狀態機與指令規則（不需要啟動服務）
+│   ├── test_rules.py        # 單元測試：異常規則與資料庫（不需要啟動服務）
 │   └── itest_broker.py      # 整合測試（需要服務在執行）
 ├── certs/                   # （自動產生，不進 git）ca.crt / ca.key / server.*
 ├── .env                     # （自動產生，不進 git）MQTT 密碼與設定
@@ -180,6 +181,8 @@ amr-mqtt-monitor/
 | `amr/<id>/online` | simulator / broker | 1 / retained（24 小時過期） | `online`；斷線時 broker 代發 Last Will `offline` |
 | `amr/<id>/cmd` | 儀表板 | 1（5 秒過期） | `pause` `resume` `charge` `clear` `go`；純文字或 JSON `{"cmd","req_id"}` |
 | `amr/<id>/cmd/result` | simulator | 1 | `{"req_id","cmd","ok","state","ts"}`，並帶回請求的 Correlation Data |
+
+**指令規則（`simulator/amr.py`）**：會開始新工作的指令（`go` 派新任務、`charge` 去充電）**只有在「閒置」時才接受**，不會搶掉進行中的任務、充電或暫停中的任務；其他狀態一律回 `ok: false`。`pause`（閒置 / 移動中 / 充電中可用）、`resume`（只在暫停時）、`clear`（只在錯誤時）只改變目前工作的執行方式。車輛自己的行為不受影響：電量低於 20% 且閒置時會自己去充電。
 | `system/<host>/stats` | sysmon | 0 / retained（24 小時過期） | Windows 使用狀況 JSON，每 2 秒 |
 | `system/<host>/online` | sysmon / broker | 1 / retained（24 小時過期） | Last Will |
 | `alarms/active` | alarmd | 1 / retained | 進行中的異常 |
@@ -278,7 +281,7 @@ amr-mqtt-monitor/
 | 限制連線數與封包大小 | ✅ | `max_connections`、`max_packet_size` |
 | broker 持久化 | ✅ | `persistence true` |
 | 監控 broker（`$SYS`） | ✅ | 儀表板 Broker 面板 |
-| 自動化測試 | ✅ | 單元 14 項、整合 14 項 |
+| 自動化測試 | ✅ | 單元 43 項、整合 14 項 |
 | Topic Alias | ➖ 不採用 | 只在本機傳輸，主題很短，省下的流量可忽略，反而增加重連時的狀態管理 |
 | Shared Subscription（`$share/`） | ➖ 不採用 | alarmd 只有一個實例；需要水平擴充時再用 |
 | Will Delay Interval | ➖ 不採用 | 斷線要立刻通知；短暫斷線已由 alarmd 的判斷時間吸收 |
@@ -303,7 +306,7 @@ amr-mqtt-monitor/
    ```bash
    cd ~/amr-mqtt-monitor
    python3 -m venv .venv
-   .venv/bin/pip install -r requirements.txt
+   .venv/bin/pip install -r requirements-dev.txt   # 執行用的套件 + pytest
    ```
 4. **MQTT 帳號密碼與 TLS 憑證**：不用手動做，第一次 `./run.sh start` 會自動執行 `scripts/setup-auth.sh` 與 `scripts/setup-tls.sh`。
 
@@ -348,7 +351,7 @@ powershell -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu-24.04\home\kuma\
 ./run.sh test
 ```
 
-預期最後顯示 `Ran 14 tests ... OK`（異常規則、遲滯、資料庫）。
+預期最後顯示 `43 passed`：車輛狀態機（只有閒置時接受新任務、暫停 / 繼續、錯誤排除、自動充電）、異常規則、遲滯、資料庫。需要 pytest（`.venv/bin/pip install -r requirements-dev.txt`）。
 
 ### 10.2 整合測試（需要服務在執行）
 

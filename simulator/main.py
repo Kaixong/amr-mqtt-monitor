@@ -5,6 +5,7 @@ Topics:
   amr/<id>/online      "online" / "offline" (retained, QoS 1, Last Will)
   amr/<id>/cmd         pause | resume | charge | clear | go  (QoS 1)
                        plain text, or JSON {"cmd": "...", "req_id": "..."}
+                       go / charge are only accepted while idle (see AMR.command)
                        simulate_netloss: test hook, the AMR goes silent without a clean
                        DISCONNECT (like a dropped network); the broker then fires its Last Will
                        after 1.5 x keepalive. Restart the simulator to bring it back.

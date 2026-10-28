@@ -11,7 +11,7 @@ The user writes in Traditional Chinese (zh-TW); reply in Traditional Chinese.
 
 ```bash
 ./run.sh start | stop | restart | status | logs
-./run.sh test     # 14 unit tests, no services needed
+./run.sh test     # 43 unit tests (pytest, requirements-dev.txt), no services needed
 ./run.sh itest    # 14 integration tests against the running broker (start first)
 ```
 
@@ -43,6 +43,9 @@ store.py = SQLite, alarmd.py = MQTT) · `common/mqttutil.py` (shared MQTT 5 + TL
   retained **without** expiry; commands carry Message Expiry 5 s + Response Topic + Correlation
   Data and AMRs only reply on their own `amr/<id>/cmd/result`.
 - Retained messages can be old: judge freshness by the payload `ts`, never by arrival alone.
+- Command rule (tested in `tests/test_amr.py`): `go` / `charge` start new work and are accepted
+  **only while idle** — never preempt a task, a charge or a paused task. `pause` / `resume` /
+  `clear` only change how the current work runs.
 - `amr/<id>/cmd` `simulate_netloss` is a test hook: that AMR goes silent until `./run.sh restart`.
 
 ## Gotchas learned the hard way

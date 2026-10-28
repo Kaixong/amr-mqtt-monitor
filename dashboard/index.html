@@ -218,7 +218,8 @@ async function runCommand(id, cmd) {
   try {
     const r = await sendCommand(id, cmd);
     if (r.ok) toast(`✓ ${label} 已執行`, "var(--ok)");
-    else toast(`${label} 被忽略（目前狀態：${STATE[r.state]?.label || r.state}）`, "var(--warn)");
+    else toast(`${label} 被忽略（目前狀態：${STATE[r.state]?.label || r.state}`
+               + (cmd === "charge" ? "，只有閒置時才接受新工作）" : "）"), "var(--warn)");
   } catch {
     toast(`✗ ${label} 沒有回應（3 秒逾時）`, "var(--bad)");
   }
