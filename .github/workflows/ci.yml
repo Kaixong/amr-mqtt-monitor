@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    name: Lint + unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r requirements-dev.txt
+      - name: flake8
+        run: .venv/bin/flake8
+      - name: pytest
+        run: ./run.sh test
+
+  integration:
+    name: Integration tests (broker + services)
+    runs-on: ubuntu-24.04
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -r requirements.txt
+      # first start creates MQTT users, TLS certificates and starts mosquitto + nginx in Docker.
+      # sysmon has no Windows to measure here: it keeps running and only logs that it can't sample.
+      - name: Start stack
+        run: ./run.sh start
+      - name: Wait for the first utilization publish
+        run: sleep 12
+      - name: Integration tests
+        run: ./run.sh itest
+      - name: Dashboard is served
+        run: curl -fsS -o /dev/null http://127.0.0.1:8080/
+      - name: Logs
+        if: always()
+        run: |
+          ./run.sh status || true
+          tail -n 30 logs/*.log || true
+          docker compose logs --tail 50 mosquitto || true
+      - name: Stop
+        if: always()
+        run: |
+          ./run.sh stop
+          docker compose down
