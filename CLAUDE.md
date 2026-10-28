@@ -86,7 +86,8 @@ don't echo password values into chat or logs.
 
 ## Git
 
-Local repo, no remote. Author is set repo-locally (`kuma`). End commit messages with:
+Public repo https://github.com/Kaixong/amr-mqtt-monitor (remote `origin`, push over HTTPS via
+`gh` login). Author is set repo-locally (`kuma`). End commit messages with:
 
 ```
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

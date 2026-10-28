@@ -9,3 +9,10 @@ mosquitto/.tls-ready
 certs/
 mosquitto/data/
 dashboard/config.js
+# never commit keys, certificates or databases, wherever they end up
+*.key
+*.pem
+*.crt
+*.srl
+*.db
+*.log

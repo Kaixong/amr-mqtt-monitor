@@ -1,5 +1,7 @@
 # AMR MQTT 監控系統（amr-mqtt-monitor）
 
+[![CI](https://github.com/Kaixong/amr-mqtt-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/Kaixong/amr-mqtt-monitor/actions/workflows/ci.yml)
+
 一個在單台 Windows 電腦上就能完整運作的 **AMR（自主移動機器人）車隊監控** 練習專案：
 
 - 模擬 5 台 AMR 在倉庫裡接任務、移動、充電、偶爾故障
