@@ -40,8 +40,8 @@
   .note { font-size: 12px; margin-top: 4px; min-height: 0; }
   .note.bad { color: var(--bad); }
   .note:empty { display: none; }
-  .btns { display: flex; gap: 6px; margin-top: 8px; }
-  .btns button { flex: 1; font: inherit; font-size: 12px; padding: 4px 0; border-radius: 6px; cursor: pointer;
+  .btns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 8px; }
+  .btns button { font: inherit; font-size: 12px; padding: 4px 0; border-radius: 6px; cursor: pointer;
                  border: 1px solid var(--line); background: transparent; color: var(--text); }
   .btns button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
   .btns button:disabled { opacity: .4; cursor: not-allowed; }
@@ -167,7 +167,8 @@ const STATE = {
   paused:   { label: "暫停",   c: "var(--warn)" },
   error:    { label: "錯誤",   c: "var(--bad)" },
 };
-const CMD_LABEL = { pause: "暫停", resume: "繼續", charge: "去充電", clear: "清除錯誤" };
+const CMD_LABEL = { pause: "暫停", resume: "繼續", clear: "清除錯誤",
+                    go: "派任務", charge: "去充電", cancel: "取消排隊" };
 const STATIONS = {
   A1: [6, 5], A2: [14, 5], A3: [22, 5], A4: [30, 5],
   B1: [6, 13], B2: [14, 13], B3: [22, 13], B4: [30, 13],
@@ -217,6 +218,7 @@ function ensureRobot(id) {
     <div class="kv">
       <span>電量</span><b data-k="battery">–</b>
       <span>任務</span><b data-k="task">–</b>
+      <span>排隊</span><b data-k="queue">–</b>
       <span>位置</span><b data-k="pos">–</b>
       <span>完成任務 / 里程</span><b data-k="done">–</b>
     </div>
@@ -224,7 +226,10 @@ function ensureRobot(id) {
     <div class="note bad" data-k="note"></div>
     <div class="btns">
       <button data-cmd="pause">暫停</button><button data-cmd="resume">繼續</button>
-      <button data-cmd="charge">去充電</button><button data-cmd="clear">清除錯誤</button>
+      <button data-cmd="clear">清除錯誤</button>
+      <button data-cmd="go" title="閒置時立刻執行，忙碌時排隊">派任務</button>
+      <button data-cmd="charge" title="閒置時立刻執行，忙碌時排隊">去充電</button>
+      <button data-cmd="cancel">取消排隊</button>
     </div>`;
   card.querySelectorAll("button").forEach(b => b.onclick = () => runCommand(id, b.dataset.cmd));
   const list = $("fleet");
@@ -239,9 +244,12 @@ async function runCommand(id, cmd) {
   const label = `${id}「${CMD_LABEL[cmd]}」`;
   try {
     const r = await sendCommand(id, cmd);
-    if (r.ok) toast(`✓ ${label} 已執行`, "var(--ok)");
-    else toast(`${label} 被忽略（目前狀態：${STATE[r.state]?.label || r.state}`
-               + (cmd === "charge" ? "，只有閒置時才接受新工作）" : "）"), "var(--warn)");
+    const state = STATE[r.state]?.label || r.state;
+    if (r.queued) toast(`⏳ ${label} 已排隊（第 ${r.queue.length} 個），${state}結束、閒置後執行`, "var(--accent)");
+    else if (r.ok) toast(`✓ ${label} 已執行`, "var(--ok)");
+    else toast(`${label} 被忽略（目前狀態：${state}` + (
+      cmd === "charge" ? "，已在充電 / 前往充電或已排隊）" :
+      cmd === "go" ? "，排隊已滿）" : cmd === "cancel" ? "，沒有排隊中的指令）" : "）"), "var(--warn)");
   } catch {
     toast(`✗ ${label} 沒有回應（3 秒逾時）`, "var(--bad)");
   }
@@ -271,6 +279,8 @@ function renderRobot(r) {
   bb.style.width = `${s.battery}%`;
   bb.style.setProperty("--c", s.battery < 20 ? "var(--bad)" : s.battery < 40 ? "var(--warn)" : "var(--ok)");
   q("task").textContent = s.task || "—";
+  const queue = s.queue || [];
+  q("queue").textContent = queue.length ? queue.map(c => CMD_LABEL[c] || c).join(" → ") : "—";
   q("pos").textContent = `(${s.x.toFixed(1)}, ${s.y.toFixed(1)}) ${Math.round(s.heading)}°`;
   q("done").textContent = `${s.tasks_done} / ${s.odometer.toFixed(0)} m`;
 
@@ -281,8 +291,9 @@ function renderRobot(r) {
         .forEach(a => notes.push(`⚠ ${App.typeLabel(a.type)}`));
   q("note").textContent = notes.join("　");
   r.card.querySelectorAll("button").forEach(b => {
-    b.disabled = offline;
-    b.title = offline ? "車輛離線，無法下指令" : "";
+    b.disabled = offline || (b.dataset.cmd === "cancel" && !queue.length);
+    if (offline) b.title = "車輛離線，無法下指令";
+    else if (b.title === "車輛離線，無法下指令") b.title = "";
   });
 }
 

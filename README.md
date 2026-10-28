@@ -195,10 +195,16 @@ amr-mqtt-monitor/
 |---|---|---|---|
 | `amr/<id>/status` | simulator | 0 / retained（24 小時過期） | JSON：位置、方向、電量、狀態、任務、錯誤、里程…，每 0.5 秒 |
 | `amr/<id>/online` | simulator / broker | 1 / retained（24 小時過期） | `online`；斷線時 broker 代發 Last Will `offline` |
-| `amr/<id>/cmd` | 儀表板 | 1（5 秒過期） | `pause` `resume` `charge` `clear` `go`；純文字或 JSON `{"cmd","req_id"}` |
-| `amr/<id>/cmd/result` | simulator | 1 | `{"req_id","cmd","ok","state","ts"}`，並帶回請求的 Correlation Data |
+| `amr/<id>/cmd` | 儀表板 | 1（5 秒過期） | `pause` `resume` `charge` `clear` `go` `cancel`；純文字或 JSON `{"cmd","req_id"}` |
+| `amr/<id>/cmd/result` | simulator | 1 | `{"req_id","cmd","ok","queued","queue","state","ts"}`，並帶回請求的 Correlation Data |
 
-**指令規則（`simulator/amr.py`）**：會開始新工作的指令（`go` 派新任務、`charge` 去充電）**只有在「閒置」時才接受**，不會搶掉進行中的任務、充電或暫停中的任務；其他狀態一律回 `ok: false`。`pause`（閒置 / 移動中 / 充電中可用）、`resume`（只在暫停時）、`clear`（只在錯誤時）只改變目前工作的執行方式。車輛自己的行為不受影響：電量低於 20% 且閒置時會自己去充電。
+**指令規則（`simulator/amr.py`）**，分兩層：
+
+1. **狀態機（`AMR.command`）**：會開始新工作的指令（`go` 派新任務、`charge` 去充電）**只有在「閒置」時才接受**，不會搶掉進行中的任務、充電或暫停中的任務。`pause`（閒置 / 移動中 / 充電中可用）、`resume`（只在暫停時）、`clear`（只在錯誤時）只改變目前工作的執行方式。
+2. **排隊（`AMR.request`，MQTT 指令的入口）**：車輛忙碌時收到 `go` / `charge` **不會被拒絕，而是排隊**（最多 3 個，依序），等它下一次閒置時才交給狀態機執行；回覆 `ok: true, queued: true`。`cancel` 清空排隊。暫停、錯誤時排隊會保留，恢復後繼續。
+   - `charge` 在已經充電、正在前往充電站或已經排隊時會被拒絕（沒有意義）
+   - 閒置時電量低於 20% 車輛會自己去充電，此時排隊中的 `charge` 會被移除，其他指令保留
+   - 儀表板卡片顯示「排隊」欄位，按鈕有「派任務 / 去充電 / 取消排隊」
 | `system/<host>/stats` | sysmon | 0 / retained（24 小時過期） | Windows 使用狀況 JSON，每 2 秒 |
 | `system/<host>/online` | sysmon / broker | 1 / retained（24 小時過期） | Last Will |
 | `alarms/active` | alarmd | 1 / retained | 進行中的異常 |
@@ -306,7 +312,7 @@ amr-mqtt-monitor/
 | 限制連線數與封包大小 | ✅ | `max_connections`、`max_packet_size` |
 | broker 持久化 | ✅ | `persistence true` |
 | 監控 broker（`$SYS`） | ✅ | 儀表板 Broker 面板 |
-| 自動化測試 | ✅ | 單元 58 項、整合 16 項 |
+| 自動化測試 | ✅ | 單元 77 項、整合 17 項 |
 | Topic Alias | ➖ 不採用 | 只在本機傳輸，主題很短，省下的流量可忽略，反而增加重連時的狀態管理 |
 | Shared Subscription（`$share/`） | ➖ 不採用 | alarmd 只有一個實例；需要水平擴充時再用 |
 | Will Delay Interval | ➖ 不採用 | 斷線要立刻通知；短暫斷線已由 alarmd 的判斷時間吸收 |
@@ -384,7 +390,7 @@ powershell -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu-24.04\home\kuma\
 ./run.sh test
 ```
 
-預期最後顯示 `58 passed`：車輛狀態機（只有閒置時接受新任務、暫停 / 繼續、錯誤排除、自動充電）、異常規則、遲滯、異常資料庫、狀態區間與稼動率計算。需要 pytest（`.venv/bin/pip install -r requirements-dev.txt`）。
+預期最後顯示 `77 passed`：車輛狀態機（只有閒置時接受新任務、暫停 / 繼續、錯誤排除、自動充電）、指令排隊（忙碌時排隊、依序執行、不搶佔、上限、取消）、異常規則、遲滯、異常資料庫、狀態區間與稼動率計算。需要 pytest（`.venv/bin/pip install -r requirements-dev.txt`）。
 
 ### 10.2 整合測試（需要服務在執行）
 
@@ -392,14 +398,14 @@ powershell -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu-24.04\home\kuma\
 ./run.sh itest
 ```
 
-預期 `Ran 16 tests ... OK`，約 15 秒。會實際連到 broker 驗證：
+預期 `Ran 17 tests ... OK`，約 15 秒。會實際連到 broker 驗證：
 
 | 類別 | 驗證內容 |
 |---|---|
 | 傳輸 | 1883 明碼 port 不存在；不信任我們 CA 的用戶端連不上 8883；憑證是發給 localhost 的；9001 與 9443（WSS）可登入 |
 | 驗證 / 授權 | 匿名與錯誤密碼被拒；`dashboard` 不能假冒車輛狀態或稼動率；`alarmd` 不能下指令 |
 | recorder | `stats/utilization` 有發布、每台車的狀態百分比加總約 100% |
-| MQTT 5 | retained 狀態帶 Content Type / Payload Format / 24 小時過期；指令回覆帶回 Correlation Data；不接受其他 Response Topic；**持久 session 中過期的指令被 broker 丟棄、未過期的照常送達**；異常狀態為 retained JSON；`$SYS` 可讀 |
+| MQTT 5 | retained 狀態帶 Content Type / Payload Format / 24 小時過期；指令回覆帶回 Correlation Data；忙碌的車輛把 `go` 排隊（不搶佔）、`cancel` 清空排隊；不接受其他 Response Topic；**持久 session 中過期的指令被 broker 丟棄、未過期的照常送達**；異常狀態為 retained JSON；`$SYS` 可讀 |
 
 ### 10.3 用命令列手動操作 MQTT
 
@@ -554,5 +560,5 @@ powershell -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu-24.04\home\kuma\
 - **模擬器沒有避碰**：車輛可能在地圖上重疊，包含開過離線車輛停住的位置。
 - **單獨關掉模擬器會記成「失去連線」**：`./run.sh stop` / `restart` 會先停 alarmd 與 recorder 所以不會；但若只停模擬器或它當掉，alarmd 與 recorder 無法分辨是計畫性停機。
 - **稼動率的「24 小時」只算 recorder 有在執行的時間**：電腦關機或服務停止的時間不列入分母。
-- **「去充電」按鈕大多會被拒**：依規則只有閒置時接受新工作，而每趟任務之間的閒置只有 1～4 秒。
+- **排隊只存在模擬器的記憶體裡**：模擬器重啟後排隊會清空（指令本身也只有 5 秒有效期）。
 - **異常記錄頁只顯示最近 300 筆**：完整記錄在 `data/alarms.db`。

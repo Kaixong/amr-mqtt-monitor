@@ -2,6 +2,7 @@
 import math
 import random
 import time
+from collections import deque
 
 # Warehouse floor in metres
 MAP_W, MAP_H = 40.0, 25.0
@@ -23,6 +24,8 @@ LOW_BATTERY = 20.0
 FULL_BATTERY = 95.0
 ERROR_CHANCE = 0.0008  # per tick
 ERROR_SECONDS = 8.0
+QUEUEABLE = ("go", "charge")   # new work: queued while busy, run once idle
+MAX_QUEUE = 3
 
 
 class AMR:
@@ -42,8 +45,30 @@ class AMR:
         self.idle_until = time.time() + random.uniform(0, 3)
         self.tasks_done = 0
         self.odometer = 0.0
+        self.queue = deque()       # go / charge waiting for the AMR to become idle
 
     # ---------- commands ----------
+    def request(self, cmd):
+        """Entry point for remote commands: "accepted" | "queued" | "rejected".
+
+        go / charge sent while the AMR is busy are queued (at most MAX_QUEUE) and run, in
+        order, as soon as it is idle again; command() itself still only accepts them while
+        idle. cancel empties the queue. Everything else goes straight to command().
+        """
+        if cmd == "cancel":
+            if not self.queue:
+                return "rejected"
+            self.queue.clear()
+            return "accepted"
+        if cmd in QUEUEABLE and self.state != "idle":
+            if cmd == "charge" and (self.charger or "charge" in self.queue):
+                return "rejected"      # already charging / on its way / queued
+            if len(self.queue) >= MAX_QUEUE:
+                return "rejected"
+            self.queue.append(cmd)
+            return "queued"
+        return "accepted" if self.command(cmd) else "rejected"
+
     # Commands that start new work (go, charge) are only accepted while idle: they never
     # preempt a running task, a charge or a paused task. pause / resume / clear only change
     # how the current work runs. Returns True if the command was accepted.
@@ -94,6 +119,10 @@ class AMR:
             self.battery -= DRAIN_IDLE * dt
             if self.battery < LOW_BATTERY:
                 self._go_charge()
+                if "charge" in self.queue:   # already done by itself
+                    self.queue.remove("charge")
+            elif self.queue:
+                self.command(self.queue.popleft())
             elif now >= self.idle_until:
                 self._new_task()
         elif self.state == "moving":
@@ -149,6 +178,7 @@ class AMR:
             "task": self.task,
             "target": self.target,
             "error": self.error_msg,
+            "queue": list(self.queue),
             "tasks_done": self.tasks_done,
             "odometer": round(self.odometer, 1),
             "ts": round(time.time(), 3),

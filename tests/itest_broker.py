@@ -188,6 +188,26 @@ class Mqtt5(unittest.TestCase):
         self.assertEqual(m.properties.ContentType, "application/json")
         c.close()
 
+    def test_busy_amr_queues_new_work_and_cancel_clears_it(self):
+        c = Conn("dashboard").sub("amr/AMR-04/cmd/result")
+
+        def send(cmd):
+            c.c.publish("amr/AMR-04/cmd", cmd, qos=1)
+            return json.loads(c.get(timeout=5).payload)
+
+        try:
+            send("pause")                 # paused = busy (only refused if it is in error: busy too)
+            r = send("go")
+            self.assertTrue(r["ok"] and r["queued"])
+            self.assertEqual(r["queue"], ["go"])
+            self.assertIn(r["state"], ("paused", "error"))   # nothing was preempted
+            r = send("cancel")
+            self.assertTrue(r["ok"])
+            self.assertEqual(r["queue"], [])
+        finally:
+            c.c.publish("amr/AMR-04/cmd", "resume", qos=1).wait_for_publish(3)
+            c.close()
+
     def test_recorder_publishes_utilization(self):
         c = Conn("dashboard").sub("stats/utilization")
         m = c.get(timeout=12)                      # retained, or the next one within 10 s

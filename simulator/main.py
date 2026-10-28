@@ -3,13 +3,15 @@
 Topics:
   amr/<id>/status      JSON status, retained, QoS 0, every tick
   amr/<id>/online      "online" / "offline" (retained, QoS 1, Last Will)
-  amr/<id>/cmd         pause | resume | charge | clear | go  (QoS 1)
+  amr/<id>/cmd         pause | resume | charge | clear | go | cancel  (QoS 1)
                        plain text, or JSON {"cmd": "...", "req_id": "..."}
-                       go / charge are only accepted while idle (see AMR.command)
+                       go / charge sent while busy are queued and run once idle;
+                       cancel empties the queue (see AMR.request)
                        simulate_netloss: test hook, the AMR goes silent without a clean
                        DISCONNECT (like a dropped network); the broker then fires its Last Will
                        after 1.5 x keepalive. Restart the simulator to bring it back.
-  amr/<id>/cmd/result  {"req_id", "cmd", "ok", "state"} reply (QoS 1), echoing the request's
+  amr/<id>/cmd/result  {"req_id", "cmd", "ok", "queued", "queue", "state"} reply (QoS 1),
+                       ok = accepted or queued; echoing the request's
                        MQTT v5 Correlation Data. This is the only Response Topic accepted.
 JSON messages carry Content Type + Payload Format Indicator; retained ones expire after 24 h.
 
@@ -66,8 +68,8 @@ def make_amr_client(amr, host, port):
             amr.netloss = True  # main loop stops this client's network loop
             print(f"[{amr.id}] simulating network loss")
             return
-        ok = amr.command(cmd)
-        print(f"[{amr.id}] cmd={cmd!r} -> {'ok' if ok else 'ignored'} (state={amr.state})")
+        res = amr.request(cmd)
+        print(f"[{amr.id}] cmd={cmd!r} -> {res} (state={amr.state}, queue={list(amr.queue)})")
 
         # reply on the requested Response Topic, echoing its Correlation Data. Only our own
         # result topic is accepted (the ACL would drop anything else anyway).
@@ -78,7 +80,8 @@ def make_amr_client(amr, host, port):
         props = json_props()
         if getattr(req, "CorrelationData", None):
             props.CorrelationData = req.CorrelationData
-        result = {"req_id": req_id, "cmd": cmd, "ok": ok, "state": amr.state,
+        result = {"req_id": req_id, "cmd": cmd, "ok": res != "rejected",
+                  "queued": res == "queued", "queue": list(amr.queue), "state": amr.state,
                   "ts": round(time.time(), 3)}
         client.publish(reply_topic, json.dumps(result), qos=1, properties=props)
 

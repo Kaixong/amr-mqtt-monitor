@@ -11,8 +11,8 @@ The user writes in Traditional Chinese (zh-TW); reply in Traditional Chinese.
 
 ```bash
 ./run.sh start | stop | restart | status | logs
-./run.sh test     # 58 unit tests (pytest, requirements-dev.txt), no services needed
-./run.sh itest    # 16 integration tests against the running broker (start first)
+./run.sh test     # 77 unit tests (pytest, requirements-dev.txt), no services needed
+./run.sh itest    # 17 integration tests against the running broker (start first)
 .venv/bin/flake8  # lint (max line 110, .flake8)
 ```
 
@@ -54,9 +54,12 @@ utilization logic, statedb.py = SQLite `data/telemetry.db`, recorder.py = MQTT, 
   so the recorder ignores retained offline (silence > 3 s is detected separately).
 - New MQTT user: add it to `USERS` + the `docker run -e Un/Pn` list in `scripts/setup-auth.sh`,
   to `mosquitto/acl`, and to the `.env` check in `run.sh start_all` (so upgrades create it).
-- Command rule (tested in `tests/test_amr.py`): `go` / `charge` start new work and are accepted
-  **only while idle** — never preempt a task, a charge or a paused task. `pause` / `resume` /
-  `clear` only change how the current work runs.
+- Command rule (tested in `tests/test_amr.py`), two layers in `simulator/amr.py`:
+  `AMR.command` (state machine) accepts `go` / `charge` **only while idle** — never preempts a
+  task, a charge or a paused task; `pause` / `resume` / `clear` only change how current work
+  runs. `AMR.request` (MQTT entry point) queues `go` / `charge` sent while busy (max 3, FIFO,
+  run on the next idle tick in `step()`), `cancel` empties the queue; replies carry
+  `ok` / `queued` / `queue`, and `status` carries `queue`.
 - `amr/<id>/cmd` `simulate_netloss` is a test hook: that AMR goes silent until `./run.sh restart`.
 
 ## Gotchas learned the hard way
