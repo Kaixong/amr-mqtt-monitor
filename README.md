@@ -5,11 +5,12 @@
 - 模擬 5 台 AMR 在倉庫裡接任務、移動、充電、偶爾故障
 - 即時顯示**這台 Windows 電腦本身**的 CPU / 記憶體 / 磁碟 / 網路 / 電池
 - 自動**偵測異常**（斷線、故障、低電量、卡住、資源過高…），寫入資料庫並在網頁上警報
+- **記錄每台車的狀態變化**到 SQLite，在儀表板顯示最近 1 / 24 小時的**稼動率**
 - 所有資料都透過 **MQTT 5** 傳遞（後端走 TLS 加密），網頁直接以 WebSocket 訂閱，沒有額外的後端 API
 
 | 頁面 | 網址 |
 |---|---|
-| 儀表板：倉庫地圖、車隊狀態、電腦使用狀況、Broker 狀態 | http://localhost:8080 |
+| 儀表板：倉庫地圖、車隊狀態、稼動率、電腦使用狀況、Broker 狀態 | http://localhost:8080 |
 | 異常記錄：篩選、確認、匯出 CSV | http://localhost:8080/alarms.html |
 
 ---
@@ -43,8 +44,8 @@
 | 通訊協定 | **MQTT 5.0** | Last Will、Retained、QoS 0/1、Session / Message Expiry、Response Topic + Correlation Data、Content Type、User Properties |
 | 加密 | **TLS 1.2+**，憑證由 **OpenSSL** 3.0 產生的私有 CA 簽發 | 後端連線加密並驗證 broker 身分 |
 | 網頁伺服器 | **nginx** 1.31（`nginx:alpine`） | 提供 `dashboard/` 靜態檔，port 8080 |
-| 後端程式 | **Python** 3.12 + **paho-mqtt** 2.1.0 | 模擬器、Windows 監控、異常偵測服務（各自一個 MQTT 用戶端） |
-| 資料庫 | **SQLite** 3.45（Python 內建） | 異常記錄 `data/alarms.db` |
+| 後端程式 | **Python** 3.12 + **paho-mqtt** 2.1.0 | 模擬器、Windows 監控、異常偵測服務、狀態記錄服務（各自一個 MQTT 用戶端） |
+| 資料庫 | **SQLite** 3.45（Python 內建） | 異常記錄 `data/alarms.db`、車輛狀態區間 `data/telemetry.db` |
 | Windows 資料來源 | **Windows PowerShell** 5.1 + **CIM/WMI** 效能計數器 | 讀取 Windows 本機 CPU（含每個執行緒）、記憶體、磁碟、網路、電池 |
 | 前端 | 原生 **HTML / CSS / JavaScript** + **MQTT.js** 5.10.1（CDN） + inline **SVG** | 不需要建置工具；地圖、圖表都是 SVG |
 | 測試 | **pytest**（單元）、Python **unittest**（整合） | 單元測試（車輛狀態機、異常規則）＋整合測試（實際連 broker） |
@@ -69,6 +70,8 @@ flowchart LR
     SYS["monitor/sysmon.py"]
     ALM["alarm/alarmd.py<br/>規則引擎"]
     DB[("data/alarms.db<br/>SQLite")]
+    REC["recorder/recorder.py<br/>狀態記錄 / 稼動率"]
+    TDB[("data/telemetry.db<br/>SQLite")]
   end
   BR -- "HTTP 取得網頁" --> NG
   BR <-- "MQTT 5 over WebSocket :9001<br/>(帳號 dashboard)" --> MQ
@@ -76,6 +79,8 @@ flowchart LR
   SYS -- "MQTT 5 / TLS :8883<br/>電腦使用狀況" --> MQ
   ALM <-- "MQTT 5 / TLS :8883<br/>訂閱遙測、發布異常" --> MQ
   ALM --- DB
+  REC <-- "MQTT 5 / TLS :8883<br/>訂閱車輛狀態、發布稼動率" --> MQ
+  REC --- TDB
   PS -- "stats.json（每 2 秒）" --> SYS
   SYS -- "heartbeat" --> PS
 ```
@@ -88,8 +93,9 @@ flowchart LR
 | **simulator** | 5 台 AMR，每台一個 MQTT 連線，每 0.5 秒發布狀態 | 每台有自己的 Last Will（斷線時 broker 代發 `offline`）；持久 session；以 Correlation Data 回覆指令 |
 | **sysmon** | 把 Windows 使用狀況發布到 MQTT | 從 WSL 裡看到的是 WSL 虛擬機，不是 Windows；所以另外啟動一個**獨立、隱藏的 Windows PowerShell** 取樣，透過檔案交換資料（見下方） |
 | **alarmd** | 訂閱所有遙測，套用規則，產生 / 恢復 / 確認異常 | 規則（`rules.py`）是純邏輯、可單元測試；每筆異常寫入 SQLite；自己斷線時暫停判斷避免誤報 |
+| **recorder** | 把每台車的狀態變化記成「狀態區間」，每 10 秒發布稼動率 | 邏輯（`tracker.py`）是純邏輯、可單元測試；只在狀態改變時寫入 SQLite（不是每筆遙測），保留 30 天；用發布者的 `ts` 計時；超過 3 秒沒回報記為「離線」；忽略舊的 retained `offline`，避免重啟時誤記離線 |
 | **nginx** | 只提供靜態檔 | 網頁自己用 MQTT.js 連 broker，nginx 不參與資料流 |
-| **儀表板** | 即時地圖、車隊、電腦、Broker 狀態、警報橫幅 | 指令用 MQTT 5 request/response，按鈕會顯示「已執行 / 被忽略 / 沒有回應」 |
+| **儀表板** | 即時地圖、車隊、稼動率、電腦、Broker 狀態、警報橫幅 | 指令用 MQTT 5 request/response，按鈕會顯示「已執行 / 被忽略 / 沒有回應」 |
 | **異常記錄頁** | 歷史異常列表 | 讀取 retained 的 `alarms/history`；確認動作送到 `alarms/ack` |
 
 ### 資料流：一次「車輛斷線」會發生什麼
@@ -122,6 +128,7 @@ amr-mqtt-monitor/
 ├── run.sh                   # 啟動 / 停止 / 狀態 / 測試（在 Ubuntu 裡用）
 ├── docker-compose.yml       # mosquitto + nginx（只綁定 127.0.0.1）
 ├── requirements.txt         # Python 套件
+├── requirements-dev.txt     # ＋ pytest（開發 / 測試用）
 ├── simulator/
 │   ├── amr.py               # 單台 AMR 的模擬邏輯（狀態機、電量、移動）
 │   └── main.py              # 車隊 + MQTT（狀態發布、指令、回覆、Last Will）
@@ -131,6 +138,10 @@ amr-mqtt-monitor/
 │   ├── rules.py             # 異常規則（門檻在 DEFAULTS）
 │   ├── store.py             # SQLite 存取
 │   └── alarmd.py            # 異常偵測服務（MQTT 收發）
+├── recorder/
+│   ├── tracker.py           # 狀態區間與稼動率計算（純邏輯）
+│   ├── statedb.py           # SQLite 存取（state_intervals）
+│   └── recorder.py          # 狀態記錄服務（MQTT 收發）
 ├── common/
 │   └── mqttutil.py          # 共用：MQTT 5 + TLS 連線、帳密、重連退避、CONNACK 錯誤、PUBLISH 屬性
 ├── dashboard/
@@ -152,10 +163,12 @@ amr-mqtt-monitor/
 ├── tests/
 │   ├── test_amr.py          # 單元測試：車輛狀態機與指令規則（不需要啟動服務）
 │   ├── test_rules.py        # 單元測試：異常規則與資料庫（不需要啟動服務）
+│   ├── test_recorder.py     # 單元測試：狀態區間、稼動率、SQLite（不需要啟動服務）
 │   └── itest_broker.py      # 整合測試（需要服務在執行）
 ├── certs/                   # （自動產生，不進 git）ca.crt / ca.key / server.*
 ├── .env                     # （自動產生，不進 git）MQTT 密碼與設定
 ├── data/alarms.db           # （不進 git）異常記錄
+├── data/telemetry.db        # （不進 git）車輛狀態區間（稼動率）
 └── logs/                    # （不進 git）各服務 log、PID、sysmon 交換檔
 ```
 
@@ -190,6 +203,8 @@ amr-mqtt-monitor/
 | `alarms/event` | alarmd | 1 | `{"action": "raised"/"cleared"/"acked", "alarm": {...}}` |
 | `alarms/ack` | 儀表板 | 1 | `{"id": 12, "by": "..."}` 或 `{"all": true, "by": "..."}` |
 | `alarms/service/online` | alarmd / broker | 1 / retained | Last Will（儀表板據此顯示「異常偵測服務離線」） |
+| `stats/utilization` | recorder | 1 / retained | 每 10 秒：`{"ts","since","windows":{"3600":{...},"86400":{...}}}`，每台車 `{"total" 秒, "utilization" %, "states": {狀態: %}}` |
+| `stats/recorder/online` | recorder / broker | 1 / retained | Last Will |
 | `$SYS/broker/...` | mosquitto | — | broker 統計（每 5 秒），顯示在儀表板 |
 
 所有 JSON 訊息都帶 **Content Type** `application/json` 與 **Payload Format Indicator**（UTF-8）；文字訊息帶 `text/plain`。
@@ -210,7 +225,7 @@ amr-mqtt-monitor/
 | **Content Type / Payload Format Indicator** | 所有訊息 | 接收端不用猜格式 |
 | **User Properties** | 指令 | 標示送出者（`sender: dashboard`） |
 | **CONNACK 原因碼** | 所有 Python 服務 | 被拒絕時（例如密碼錯誤）在 log 寫出原因與處理建議，並以退避方式重試 |
-| **時間戳記判斷 retained 新舊** | 儀表板、alarmd | retained 可能是很久以前的資料，不能當成「剛收到」 |
+| **時間戳記判斷 retained 新舊** | 儀表板、alarmd、recorder | retained 可能是很久以前的資料，不能當成「剛收到」 |
 
 ---
 
@@ -234,6 +249,13 @@ amr-mqtt-monitor/
 - **防誤報**：alarmd 與 broker 斷線期間、以及重新連上後 10 秒內暫停判斷（broker 重啟不會讓所有車同時誤報）；`./run.sh stop` 會先停 alarmd
 - 門檻都在 [`alarm/rules.py`](alarm/rules.py) 的 `DEFAULTS`
 
+### 稼動率（recorder）
+
+- **稼動率 = 「移動中」時間 ÷ 觀測時間**。觀測時間包含閒置、充電、暫停、錯誤與離線；recorder 沒在執行的時間不算（沒有觀測）
+- 每台車的狀態變化存成一列 `state_intervals(amr_id, state, started_at, ended_at)`，狀態有 `moving` `charging` `idle` `paused` `error` `offline`
+- 「離線」：3 秒沒有狀態，或收到 Last Will `offline`（從最後一次回報的時間開始算）
+- 儀表板的稼動率面板可切換最近 1 小時 / 24 小時；資料不足一個區間時會顯示「只有 N 分的資料」
+
 ---
 
 ## 6. 安全性
@@ -242,8 +264,8 @@ amr-mqtt-monitor/
 |---|---|
 | 傳輸加密 | Python 服務與命令列工具走 **TLS 1.2+**（port 8883），用 `certs/ca.crt` 驗證 broker 憑證（CN / SAN = localhost、127.0.0.1）；**沒有明碼 TCP port** |
 | 網路暴露 | Docker 只綁定 `127.0.0.1`，網路上的其他裝置連不到 |
-| 驗證 | `allow_anonymous false`，帳號：`simulator` `sysmon` `alarmd` `dashboard` |
-| 授權（ACL） | 最小權限，見 [`mosquitto/acl`](mosquitto/acl)。例如 `dashboard` 只能讀取、對 `amr/+/cmd` 下指令、對 `alarms/ack` 確認，**不能**假冒車輛狀態；`alarmd` 不能下指令 |
+| 驗證 | `allow_anonymous false`，帳號：`simulator` `sysmon` `alarmd` `recorder` `dashboard` |
+| 授權（ACL） | 最小權限，見 [`mosquitto/acl`](mosquitto/acl)。例如 `dashboard` 只能讀取、對 `amr/+/cmd` 下指令、對 `alarms/ack` 確認，**不能**假冒車輛狀態或稼動率；`alarmd` 不能下指令；`recorder` 只能讀車輛狀態、寫 `stats/*` |
 | 密碼保存 | 隨機產生在 `.env`（權限 600、不進 git）；broker 端是雜湊後的 `mosquitto/secrets/passwd`，只有 broker 的使用者（uid 1883）可讀 |
 | 私鑰保存 | `certs/ca.key`、`certs/server.key` 權限 600、不進 git |
 | 瀏覽器帳密 | `dashboard/config.js` 會被網頁讀取，等同公開，所以 `dashboard` 帳號權限刻意最小 |
@@ -263,9 +285,9 @@ amr-mqtt-monitor/
 | 主題不以 `/` 開頭、不含空白、具體分層、包含裝置 ID | ✅ | `amr/<id>/status` 等 |
 | 不訂閱 `#`（只訂閱需要的） | ✅ | 每個程式只訂閱自己需要的主題 |
 | 依資料性質選 QoS | ✅ | 遙測 0、指令 / 事件 1 |
-| Retained 給「最新狀態」用 | ✅ | 狀態、上下線、異常清單 |
+| Retained 給「最新狀態」用 | ✅ | 狀態、上下線、異常清單、稼動率 |
 | 保留訊息要能自動清除 | ✅ | 遙測設 24 小時 Message Expiry |
-| Last Will 偵測異常斷線 | ✅ | 每台 AMR、sysmon、alarmd |
+| Last Will 偵測異常斷線 | ✅ | 每台 AMR、sysmon、alarmd、recorder |
 | 適當的 Keepalive | ✅ | AMR 5 秒、其他 10 秒 |
 | 持久 session 搭配 Session Expiry | ✅ | AMR 60 秒 |
 | 指令設 Message Expiry，避免執行過期指令 | ✅ | 5 秒（整合測試驗證） |
@@ -273,15 +295,15 @@ amr-mqtt-monitor/
 | 標示酬載格式（Content Type、Payload Format Indicator） | ✅ | 所有訊息 |
 | 處理 CONNACK 原因碼 | ✅ | log 寫出原因與建議 |
 | 重連退避 | ✅ | 1 → 30 秒 |
-| 唯一的 Client ID | ✅ | `sim-AMR-01`、`sysmon`、`alarmd`、`dash-<隨機>` |
-| 關閉匿名、每個用戶端獨立帳號 | ✅ | 4 個帳號 |
+| 唯一的 Client ID | ✅ | `sim-AMR-01`、`sysmon`、`alarmd`、`recorder`、`dash-<隨機>` |
+| 關閉匿名、每個用戶端獨立帳號 | ✅ | 5 個帳號 |
 | 最小權限 ACL | ✅ | `mosquitto/acl` |
 | TLS 加密並驗證 broker 憑證 | ✅（後端）／⚠️（瀏覽器預設 ws，見限制） | 8883、9443 |
 | 不對外開放 port | ✅ | 只綁 127.0.0.1 |
 | 限制連線數與封包大小 | ✅ | `max_connections`、`max_packet_size` |
 | broker 持久化 | ✅ | `persistence true` |
 | 監控 broker（`$SYS`） | ✅ | 儀表板 Broker 面板 |
-| 自動化測試 | ✅ | 單元 43 項、整合 14 項 |
+| 自動化測試 | ✅ | 單元 58 項、整合 16 項 |
 | Topic Alias | ➖ 不採用 | 只在本機傳輸，主題很短，省下的流量可忽略，反而增加重連時的狀態管理 |
 | Shared Subscription（`$share/`） | ➖ 不採用 | alarmd 只有一個實例；需要水平擴充時再用 |
 | Will Delay Interval | ➖ 不採用 | 斷線要立刻通知；短暫斷線已由 alarmd 的判斷時間吸收 |
@@ -321,7 +343,7 @@ cd ~/amr-mqtt-monitor
 ./run.sh start
 ```
 
-成功時會看到三個服務 `started`，最後一行是網址；若有服務起不來會顯示 `FAILED to start` 並回傳錯誤碼。
+成功時會看到四個服務 `started`，最後一行是網址；若有服務起不來會顯示 `FAILED to start` 並回傳錯誤碼。
 
 ### 方法 B：在 Windows 一鍵啟動（會自動開啟瀏覽器）
 
@@ -337,7 +359,9 @@ powershell -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu-24.04\home\kuma\
 ./run.sh status
 ```
 
-應該看到 `dashboard` 與 `mosquitto` 為 `Up`，`simulator` `sysmon` `alarmd` 為 `running`。接著打開 http://localhost:8080 ，右上角應顯示「已連線」、地圖上有 5 台車在移動、右側有電腦使用狀況與 Broker 狀態。
+應該看到 `dashboard` 與 `mosquitto` 為 `Up`，`simulator` `sysmon` `alarmd` `recorder` 為 `running`。接著打開 http://localhost:8080 ，右上角應顯示「已連線」、地圖上有 5 台車在移動、車隊下方約 10 秒後出現稼動率、右側有電腦使用狀況與 Broker 狀態。
+
+> 從舊版更新上來：第一次 `./run.sh start` 會自動替新的 `recorder` 帳號產生密碼並重新載入 broker（其他密碼不變）。
 
 ---
 
@@ -351,7 +375,7 @@ powershell -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu-24.04\home\kuma\
 ./run.sh test
 ```
 
-預期最後顯示 `43 passed`：車輛狀態機（只有閒置時接受新任務、暫停 / 繼續、錯誤排除、自動充電）、異常規則、遲滯、資料庫。需要 pytest（`.venv/bin/pip install -r requirements-dev.txt`）。
+預期最後顯示 `58 passed`：車輛狀態機（只有閒置時接受新任務、暫停 / 繼續、錯誤排除、自動充電）、異常規則、遲滯、異常資料庫、狀態區間與稼動率計算。需要 pytest（`.venv/bin/pip install -r requirements-dev.txt`）。
 
 ### 10.2 整合測試（需要服務在執行）
 
@@ -359,12 +383,13 @@ powershell -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu-24.04\home\kuma\
 ./run.sh itest
 ```
 
-預期 `Ran 14 tests ... OK`，約 12 秒。會實際連到 broker 驗證：
+預期 `Ran 16 tests ... OK`，約 15 秒。會實際連到 broker 驗證：
 
 | 類別 | 驗證內容 |
 |---|---|
 | 傳輸 | 1883 明碼 port 不存在；不信任我們 CA 的用戶端連不上 8883；憑證是發給 localhost 的；9001 與 9443（WSS）可登入 |
-| 驗證 / 授權 | 匿名與錯誤密碼被拒；`dashboard` 不能假冒車輛狀態；`alarmd` 不能下指令 |
+| 驗證 / 授權 | 匿名與錯誤密碼被拒；`dashboard` 不能假冒車輛狀態或稼動率；`alarmd` 不能下指令 |
+| recorder | `stats/utilization` 有發布、每台車的狀態百分比加總約 100% |
 | MQTT 5 | retained 狀態帶 Content Type / Payload Format / 24 小時過期；指令回覆帶回 Correlation Data；不接受其他 Response Topic；**持久 session 中過期的指令被 broker 丟棄、未過期的照常送達**；異常狀態為 retained JSON；`$SYS` 可讀 |
 
 ### 10.3 用命令列手動操作 MQTT
@@ -433,6 +458,17 @@ for r in db.execute('SELECT id, datetime(raised_at, \"unixepoch\", \"localtime\"
     print(r)"
 ```
 
+### 10.7 查看稼動率與狀態記錄
+
+```bash
+mq sub -t stats/utilization -C 1 | .venv/bin/python -m json.tool | head -20
+.venv/bin/python -c "
+import sqlite3
+db = sqlite3.connect('data/telemetry.db')
+for r in db.execute('SELECT amr_id, state, datetime(started_at, \"unixepoch\", \"localtime\"), round(ended_at - started_at, 1) FROM state_intervals ORDER BY id DESC LIMIT 5'):
+    print(r)"
+```
+
 ---
 
 ## 11. 關閉
@@ -470,6 +506,7 @@ powershell -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu-24.04\home\kuma\
 | 查看憑證到期日 | `openssl x509 -in certs/server.crt -noout -enddate` |
 | 調整異常門檻 | 編輯 `alarm/rules.py` 的 `DEFAULTS` 後 `./run.sh restart` |
 | 清空異常記錄 | `./run.sh stop && rm data/alarms.db && ./run.sh start` |
+| 清空稼動率記錄 | `./run.sh stop && rm data/telemetry.db && ./run.sh start`（平常會自動只保留 30 天） |
 | 改模擬車數 | 編輯 `run.sh` 裡 `start_one simulator simulator main.py` 加上 `-n 8` |
 
 ### 讓瀏覽器也走加密（wss://，選用）
@@ -506,5 +543,7 @@ powershell -ExecutionPolicy Bypass -File \\wsl.localhost\Ubuntu-24.04\home\kuma\
 - **瀏覽器帳密是公開的**：任何能開網頁的人都看得到 `config.js`；`dashboard` 帳號只有最小權限。
 - **不能從其他電腦 / 手機連線**：port 只綁本機。若要開放，需改 `docker-compose.yml` 的綁定、憑證加上該主機名稱、瀏覽器改走 wss，並重新檢視帳號權限。
 - **模擬器沒有避碰**：車輛可能在地圖上重疊，包含開過離線車輛停住的位置。
-- **單獨關掉模擬器會記成「失去連線」**：`./run.sh stop` / `restart` 會先停 alarmd 所以不會；但若只停模擬器或它當掉，alarmd 無法分辨是計畫性停機。
+- **單獨關掉模擬器會記成「失去連線」**：`./run.sh stop` / `restart` 會先停 alarmd 與 recorder 所以不會；但若只停模擬器或它當掉，alarmd 與 recorder 無法分辨是計畫性停機。
+- **稼動率的「24 小時」只算 recorder 有在執行的時間**：電腦關機或服務停止的時間不列入分母。
+- **「去充電」按鈕大多會被拒**：依規則只有閒置時接受新工作，而每趟任務之間的閒置只有 1～4 秒。
 - **異常記錄頁只顯示最近 300 筆**：完整記錄在 `data/alarms.db`。

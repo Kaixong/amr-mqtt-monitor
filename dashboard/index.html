@@ -70,6 +70,18 @@
   .stats b { display: block; color: var(--text); font-weight: 500; font-size: 14px; font-variant-numeric: tabular-nums; }
   .stale { color: var(--warn); font-size: 12px; }
   .stale:empty { display: none; }
+
+  /* utilization */
+  .util-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button { font: inherit; font-size: 12px; padding: 3px 10px; border: 0; cursor: pointer;
+                background: transparent; color: var(--muted); }
+  .seg button.on { background: var(--accent); color: #fff; }
+  .util-row { display: grid; grid-template-columns: 60px minmax(0, 1fr) 48px; gap: 10px; align-items: center;
+              font-size: 12.5px; margin-top: 8px; }
+  .util-row b { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .stack { display: flex; height: 12px; border-radius: 3px; overflow: hidden; background: var(--grid); }
+  .stack > i { height: 100%; background: var(--c); }
 </style>
 </head>
 <body data-page="dashboard">
@@ -87,6 +99,16 @@
     <section class="panel">
       <h2>車隊狀態</h2>
       <div class="fleet" id="fleet"></div>
+    </section>
+    <section class="panel">
+      <h2>稼動率 <span id="utilSummary"></span></h2>
+      <div class="util-head">
+        <span class="sub">稼動率 = 「移動中」佔觀測時間的比例（recorder 記錄於 SQLite）</span>
+        <span class="seg" id="utilWin"><button data-w="3600" class="on">最近 1 小時</button><button data-w="86400">最近 24 小時</button></span>
+      </div>
+      <div id="util"><div class="sub row">等待 recorder 資料…</div></div>
+      <div class="legend" id="utilLegend"></div>
+      <div class="stale" id="utilStale"></div>
     </section>
   </div>
 
@@ -291,6 +313,46 @@ onAlarms(active => {
   Object.values(robots).forEach(renderRobot);
 });
 
+/* ---------- utilization (recorder) ---------- */
+// offline is hatched so it doesn't look like idle (both grey)
+const UTIL_STATE = { ...STATE, offline: { label: "離線",
+  c: "repeating-linear-gradient(135deg, var(--muted) 0 2px, transparent 2px 5px)" } };
+const UTIL_ORDER = ["moving", "charging", "idle", "paused", "error", "offline"];
+let util = null, utilWindow = "3600", utilLast = 0;
+$("utilLegend").innerHTML = UTIL_ORDER
+  .map(s => `<span style="--c:${UTIL_STATE[s].c}">${UTIL_STATE[s].label}</span>`).join("");
+
+function renderUtil() {
+  if (!util) return;
+  const rows = util.windows[utilWindow] || {};
+  const ids = Object.keys(rows).sort();
+  const pct = v => `${v.toFixed(0)}%`;
+  $("util").innerHTML = ids.length ? ids.map(id => {
+    const u = rows[id];
+    const segs = UTIL_ORDER.filter(s => u.states[s]).map(s =>
+      `<i style="width:${u.states[s]}%;--c:${UTIL_STATE[s].c}" title="${UTIL_STATE[s].label} ${pct(u.states[s])}"></i>`);
+    return `<div class="util-row"><span>${id}</span><div class="stack">${segs.join("")}</div><b>${pct(u.utilization)}</b></div>`;
+  }).join("") : `<div class="sub row">這段時間沒有資料</div>`;
+
+  // fleet utilization weighted by observed time
+  const total = ids.reduce((a, id) => a + rows[id].total, 0);
+  const moving = ids.reduce((a, id) => a + rows[id].total * rows[id].utilization / 100, 0);
+  const observed = util.since ? util.ts - util.since : 0;
+  $("utilSummary").textContent = total ? `車隊 ${pct(moving / total * 100)}` +
+    (observed < +utilWindow ? ` · 只有 ${App.fmtDuration(observed)}的資料` : "") : "";
+}
+
+$("utilWin").querySelectorAll("button").forEach(b => b.onclick = () => {
+  utilWindow = b.dataset.w;
+  $("utilWin").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+  renderUtil();
+});
+subscribe("stats/utilization", (topic, text, packet) => {
+  util = JSON.parse(text);
+  utilLast = seenAt(util, packet);
+  renderUtil();
+}, 1);
+
 /* ---------- PC resources ---------- */
 const hist = { cpu: [], mem: [] };
 let sysLast = 0;
@@ -381,6 +443,8 @@ setInterval(() => {
   renderSummary();
   $("sysStale").textContent = Date.now() - sysLast > 10000
     ? "⚠ 沒有收到電腦狀態資料（sysmon 是否在執行？）" : "";
+  $("utilStale").textContent = Date.now() - utilLast > 30000
+    ? "⚠ 稼動率資料超過 30 秒沒有更新（recorder 是否在執行？）" : "";
 }, 1000);
 </script>
 </body>

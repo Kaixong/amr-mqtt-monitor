@@ -2,7 +2,7 @@
 # Usage: ./run.sh start | stop | restart | status | logs | test | itest
 cd "$(dirname "$0")"
 PY="$PWD/.venv/bin/python"
-SERVICES=(simulator sysmon alarmd)
+SERVICES=(simulator sysmon alarmd recorder)
 mkdir -p logs
 
 is_running() { [ -f "logs/$1.pid" ] && kill -0 "$(cat "logs/$1.pid")" 2>/dev/null; }
@@ -29,11 +29,14 @@ stop_one() {
 
 start_all() {
   # first run: create MQTT users/passwords, TLS certificates and the broker's secrets
-  [ -f .env ] && [ -f mosquitto/.auth-ready ] && [ -f dashboard/config.js ] || ./scripts/setup-auth.sh
+  # (also when a newer version added an MQTT user that .env has no password for yet)
+  [ -f .env ] && [ -f mosquitto/.auth-ready ] && [ -f dashboard/config.js ] &&
+    grep -q '^MQTT_PASS_RECORDER=' .env || ./scripts/setup-auth.sh
   [ -f certs/ca.crt ] && [ -f mosquitto/.tls-ready ] || ./scripts/setup-tls.sh
   set -a; . ./.env; set +a
   docker compose up -d
   start_one alarmd alarm alarmd.py
+  start_one recorder recorder recorder.py
   start_one simulator simulator main.py
   start_one sysmon monitor sysmon.py
   # Don't return right away: when run as `wsl -- ./run.sh start`, wsl.exe exits with us and
@@ -47,8 +50,8 @@ start_all() {
   return $failed
 }
 
-# alarmd first, so a planned stop isn't recorded as every AMR going offline
-stop_all() { for n in alarmd simulator sysmon; do stop_one "$n"; done; }
+# alarmd + recorder first, so a planned stop isn't recorded as every AMR going offline
+stop_all() { for n in alarmd recorder simulator sysmon; do stop_one "$n"; done; }
 
 case "${1:-}" in
   start) start_all ;;

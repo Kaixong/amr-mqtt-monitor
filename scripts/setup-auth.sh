@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-USERS=(simulator sysmon alarmd dashboard)
+USERS=(simulator sysmon alarmd recorder dashboard)
 IMAGE=eclipse-mosquitto:2
 
 gen() { python3 -c 'import secrets; print(secrets.token_urlsafe(18))'; }
@@ -39,13 +39,14 @@ docker run --rm --user root \
   -e U2=sysmon    -e P2="$MQTT_PASS_SYSMON" \
   -e U3=alarmd    -e P3="$MQTT_PASS_ALARMD" \
   -e U4=dashboard -e P4="$MQTT_PASS_DASHBOARD" \
+  -e U5=recorder  -e P5="$MQTT_PASS_RECORDER" \
   -e ACL_ONLY="${1:-}" \
   -v "$PWD/mosquitto:/m" "$IMAGE" sh -c '
     set -e
     umask 077
     if [ "$ACL_ONLY" != "--acl-only" ]; then
       rm -f /m/secrets/passwd; touch /m/secrets/passwd
-      for i in 1 2 3 4; do
+      for i in 1 2 3 4 5; do
         eval "mosquitto_passwd -b /m/secrets/passwd \"\$U$i\" \"\$P$i\""
       done
     fi

@@ -1,5 +1,6 @@
 """Integration tests against the running stack:  ./run.sh itest
 (needs ./run.sh start first; uses the passwords from .env and certs/ca.crt)"""
+import json
 import os
 import queue
 import socket
@@ -185,6 +186,22 @@ class Mqtt5(unittest.TestCase):
         m = c.get()
         self.assertTrue(m.retain)
         self.assertEqual(m.properties.ContentType, "application/json")
+        c.close()
+
+    def test_recorder_publishes_utilization(self):
+        c = Conn("dashboard").sub("stats/utilization")
+        m = c.get(timeout=12)                      # retained, or the next one within 10 s
+        self.assertEqual(m.properties.ContentType, "application/json")
+        u = json.loads(m.payload)["windows"]["3600"]
+        self.assertIn("AMR-01", u)
+        self.assertTrue(0 <= u["AMR-01"]["utilization"] <= 100)
+        self.assertAlmostEqual(sum(u["AMR-01"]["states"].values()), 100, delta=1)
+        c.close()
+
+    def test_dashboard_cannot_spoof_utilization(self):
+        c = Conn("dashboard").sub("stats/utilization")
+        c.c.publish("stats/utilization", '{"FAKE": 1}', qos=1)
+        self.assertTrue(c.none_matching(lambda m: b"FAKE" in m.payload))
         c.close()
 
     def test_broker_statistics_are_readable(self):

@@ -23,12 +23,20 @@ topic write alarms/history
 topic write alarms/event
 topic write alarms/service/online
 
+# State recorder: logs AMR states to SQLite, publishes utilization
+user recorder
+topic read amr/+/status
+topic read amr/+/online
+topic write stats/utilization
+topic write stats/recorder/online
+
 # Browser dashboard (its password is visible to anyone who can open the page,
 # so it can only read, send AMR commands, and acknowledge alarms)
 user dashboard
 topic read amr/#
 topic read system/#
 topic read alarms/#
+topic read stats/#
 topic read $SYS/#
 topic write amr/+/cmd
 topic write alarms/ack

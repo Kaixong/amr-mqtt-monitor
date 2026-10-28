@@ -11,8 +11,8 @@ The user writes in Traditional Chinese (zh-TW); reply in Traditional Chinese.
 
 ```bash
 ./run.sh start | stop | restart | status | logs
-./run.sh test     # 43 unit tests (pytest, requirements-dev.txt), no services needed
-./run.sh itest    # 14 integration tests against the running broker (start first)
+./run.sh test     # 58 unit tests (pytest, requirements-dev.txt), no services needed
+./run.sh itest    # 16 integration tests against the running broker (start first)
 ```
 
 - Dashboard http://localhost:8080 , alarm log http://localhost:8080/alarms.html
@@ -22,14 +22,16 @@ The user writes in Traditional Chinese (zh-TW); reply in Traditional Chinese.
 ## Layout
 
 `simulator/` (5 AMRs) · `monitor/sysmon.py` (Windows stats) · `alarm/` (rules.py = pure logic,
-store.py = SQLite, alarmd.py = MQTT) · `common/mqttutil.py` (shared MQTT 5 + TLS client) ·
+store.py = SQLite, alarmd.py = MQTT) · `recorder/` (tracker.py = pure state-interval +
+utilization logic, statedb.py = SQLite `data/telemetry.db`, recorder.py = MQTT, publishes retained
+`stats/utilization` every 10 s) · `common/mqttutil.py` (shared MQTT 5 + TLS client) ·
 `dashboard/` (static HTML/JS, MQTT.js) · `mosquitto/` (conf + acl) · `scripts/` · `tests/`
 
 ## Broker / MQTT facts that are easy to get wrong
 
 - **No plain 1883.** Backend + CLI use TLS on **8883** with `--cafile certs/ca.crt`; browser uses
   ws **9001**; wss **9443** is optional. All ports are published on **127.0.0.1 only**.
-- Anonymous is off. Users: `simulator` `sysmon` `alarmd` `dashboard`; passwords in `.env`
+- Anonymous is off. Users: `simulator` `sysmon` `alarmd` `recorder` `dashboard`; passwords in `.env`
   (`MQTT_PASS_<USER>`), rights in `mosquitto/acl` (least privilege — a new topic usually needs
   an ACL line, then `./scripts/setup-auth.sh --acl-only`).
 - CLI helper used throughout the README:
@@ -43,6 +45,10 @@ store.py = SQLite, alarmd.py = MQTT) · `common/mqttutil.py` (shared MQTT 5 + TL
   retained **without** expiry; commands carry Message Expiry 5 s + Response Topic + Correlation
   Data and AMRs only reply on their own `amr/<id>/cmd/result`.
 - Retained messages can be old: judge freshness by the payload `ts`, never by arrival alone.
+  A retained `amr/<id>/online = offline` can even arrive *after* a restarted AMR's first status,
+  so the recorder ignores retained offline (silence > 3 s is detected separately).
+- New MQTT user: add it to `USERS` + the `docker run -e Un/Pn` list in `scripts/setup-auth.sh`,
+  to `mosquitto/acl`, and to the `.env` check in `run.sh start_all` (so upgrades create it).
 - Command rule (tested in `tests/test_amr.py`): `go` / `charge` start new work and are accepted
   **only while idle** — never preempt a task, a charge or a paused task. `pause` / `resume` /
   `clear` only change how the current work runs.
@@ -52,7 +58,7 @@ store.py = SQLite, alarmd.py = MQTT) · `common/mqttutil.py` (shared MQTT 5 + TL
 
 - `run.sh start` sleeps 2 s and checks every service before returning: when called as
   `wsl -- ./run.sh start`, WSL kills a just-forked service if the script returns immediately.
-- `run.sh stop` waits for each process to exit and stops **alarmd first** (otherwise a planned
+- `run.sh stop` waits for each process to exit and stops **alarmd + recorder first** (otherwise a planned
   stop is logged as every AMR going offline, and a fast restart races the old "offline" message).
 - sysmon must measure Windows, not WSL: it launches a **detached hidden PowerShell** sampler
   (a Windows exe started directly via interop dies with the wsl.exe session) and talks to it
